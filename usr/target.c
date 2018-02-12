@@ -537,11 +537,6 @@ tgtadm_err tgt_device_create(int tid, int dev_type, uint64_t lun, char *params,
 		goto out;
 	}
 
-	if (backing && !vmdkid) {
-		eprintf("vmdkid for this lun %" PRIu64 " is not provided\n", lun);
-		adm_err = TGTADM_INVALID_REQUEST;
-		goto out;
-	}
 
 	bst = target->bst;
 	if (backing) {
@@ -555,6 +550,12 @@ tgtadm_err tgt_device_create(int tid, int dev_type, uint64_t lun, char *params,
 		}
 	} else
 		bst = get_backingstore_template("null");
+
+	if (!strncmp(bst->bs_name, "hyc", 3) && vmdkid == NULL) {
+		eprintf("vmdkid for this lun %" PRIu64 " is not provided\n", lun);
+		adm_err = TGTADM_INVALID_REQUEST;
+		goto out;
+	}
 
 	if ((!strncmp(bst->bs_name, "bsg", 3) ||
 	     !strncmp(bst->bs_name, "sg", 2)) &&
