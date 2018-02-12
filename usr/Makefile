@@ -65,6 +65,7 @@ TGTD_OBJS += tgtd.o mgmt.o target.o scsi.o log.o driver.o util.o work.o \
 TGTD_DEP = $(TGTD_OBJS:.o=.d)
 
 LDFLAGS = -Wl,-E,-rpath=$(libdir)
+LDFLAGS += -L/usr/lib/hyc
 
 .PHONY:all
 all: $(PROGRAMS) $(MODULES)
