@@ -14,7 +14,10 @@ typedef enum {
 
 /** This structure is per LUN/VMDK */
 struct bs_hyc_info {
-	dll_t                  sched_cmd_list;
+	struct {
+		dll_t           sched_cmd_list;
+		pthread_mutex_t lock;
+	};
 	struct scsi_lu        *lup;
 	char                  *vmid;
 	char                  *vmdkid;
@@ -22,7 +25,6 @@ struct bs_hyc_info {
 	int                    done_eventfd;
 	struct RequestResult  *request_resultsp;
 	uint32_t               nr_results;
-	pthread_mutex_t        lock;
 };
 
 struct hyc_cmd {

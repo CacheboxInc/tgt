@@ -264,6 +264,7 @@ static int bs_hyc_open(struct scsi_lu *lup, char *pathp,
 		goto error;
 	}
 
+	*fdp = ffd;
 	return 0;
 error:
 	if (efd >= 0) {
@@ -292,10 +293,11 @@ static void bs_hyc_close(struct scsi_lu *lup)
 }
 
 enum {
-	Opt_vmdkid, Opt_err,
+	Opt_vmid, Opt_vmdkid, Opt_err,
 };
 
 static match_table_t bs_hyc_opts = {
+	{Opt_vmid, "vmid=%s"},
 	{Opt_vmdkid, "vmdkid=%s"},
 	{Opt_err, NULL},
 };
@@ -307,22 +309,29 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	int                 rc;
 	char               *p;
 	char               *vmdkid = NULL;
+	char               *vmid = NULL;
 
-	while((p = strsep(&bsoptsp, ",")) != NULL) {
+	eprintf("bsopts:%s\n", bsoptsp);
+	while((p = strsep(&bsoptsp, ":")) != NULL) {
 		substring_t args[MAX_OPT_ARGS];
 		int token;
 		if (!*p)
 			continue;
 		token = match_token(p, bs_hyc_opts, args);
 		switch (token) {
+		case Opt_vmid:
+			vmid = match_strdup(&args[0]);
+			break;
 		case Opt_vmdkid:
 			vmdkid = match_strdup(&args[0]);
+			break;
 		default:
 			break;
 		}
 	}
-	if (!vmdkid) {
-		eprintf("hyc bst needs vmdkid as bsopts\n");
+	if (!vmid || !vmdkid) {
+		eprintf("hyc bst needs both vmid: %s & vmdkid: %s as bsopts\n",
+			vmid, vmdkid);
 		return TGTADM_INVALID_REQUEST;
 	}
 
@@ -331,9 +340,8 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	infop->lup = lup;
 
 	assert(lup->tgt);
-	assert(lup->tgt->vmid);
 
-	infop->vmid = lup->tgt->vmid;
+	infop->vmid = vmid;
 	infop->vmdkid = vmdkid;
 	infop->vmdk = GetVmdkHandle(vmdkid);
 	assert(infop->vmdk != kInvalidVmdkHandle);
@@ -350,6 +358,9 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	if (!infop->request_resultsp) {
 		eprintf("hyc bs init failed\n");
 		e = TGTADM_NOMEM;
+		free(vmid);
+		free(vmdkid);
+		pthread_mutex_destroy(&infop->lock);
 	}
 
 	return e;
@@ -365,6 +376,7 @@ static void bs_hyc_exit(struct scsi_lu *lup)
 	assert(DLL_ISEMPTY(&infop->sched_cmd_list));
 
 	free(infop->request_resultsp);
+	free(infop->vmid);
 	free(infop->vmdkid);
 
 	rc = pthread_mutex_destroy(&infop->lock);

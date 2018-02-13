@@ -581,7 +581,6 @@ int main(int argc, char **argv)
 		}
 	}
 
-
 	ep_fd = epoll_create(4096);
 	if (ep_fd < 0) {
 		fprintf(stderr, "can't create epoll fd, %m\n");

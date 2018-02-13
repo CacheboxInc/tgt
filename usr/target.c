@@ -461,8 +461,7 @@ __device_lookup(int tid, uint64_t lun, struct target **t)
 }
 
 enum {
-	Opt_path, Opt_bstype, Opt_bsopts, Opt_bsoflags, Opt_blocksize,
-	Opt_err,
+	Opt_path, Opt_bstype, Opt_bsopts, Opt_bsoflags, Opt_blocksize, Opt_err,
 };
 
 static match_table_t device_tokens = {
@@ -532,7 +531,6 @@ tgtadm_err tgt_device_create(int tid, int dev_type, uint64_t lun, char *params,
 		adm_err = TGTADM_LUN_EXIST;
 		goto out;
 	}
-
 
 	bst = target->bst;
 	if (backing) {
@@ -2123,7 +2121,7 @@ char *tgt_targetname(int tid)
 tgtadm_err tgt_target_create(int lld, int tid, char *args)
 {
 	struct target *target, *pos;
-	char *p, *q, *targetname = NULL, *vmid = NULL;
+	char *p, *q, *targetname = NULL;
 	struct backingstore_template *bst;
 
 	p = args;
@@ -2136,8 +2134,6 @@ tgtadm_err tgt_target_create(int lld, int tid, char *args)
 
 			if (!strcmp("targetname", q)) {
 				targetname = str;
-			} else if (!strcmp("vmid", q)) {
-				vmid = str;
 			} else {
 				eprintf("Unknow option %s\n", q);
 			}
@@ -2152,9 +2148,6 @@ tgtadm_err tgt_target_create(int lld, int tid, char *args)
 	}
 
 	if (!targetname)
-		return TGTADM_INVALID_REQUEST;
-
-	if(!vmid)
 		return TGTADM_INVALID_REQUEST;
 
 	target = target_lookup(tid);
@@ -2182,17 +2175,9 @@ tgtadm_err tgt_target_create(int lld, int tid, char *args)
 		return TGTADM_NOMEM;
 	}
 
-	target->vmid = strdup(vmid);
-	if (!target->vmid) {
-		free(target->name);
-		free(target);
-		return TGTADM_NOMEM;
-	}
-
 	target->account.in_aids = zalloc(DEFAULT_NR_ACCOUNT * sizeof(int));
 	if (!target->account.in_aids) {
 		free(target->name);
-		free(target->vmid);
 		free(target);
 		return TGTADM_NOMEM;
 	}
@@ -2277,7 +2262,6 @@ tgtadm_err tgt_target_destroy(int lld_no, int tid, int force)
 
 	free(target->account.in_aids);
 	free(target->name);
-	free(target->vmid);
 	free(target);
 
 	return TGTADM_SUCCESS;
