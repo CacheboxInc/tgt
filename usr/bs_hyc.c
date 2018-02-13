@@ -18,6 +18,7 @@
 #include "scsi.h"
 #include "target.h"
 #include "util.h"
+#include "parser.h"
 
 #include "bs_hyc.h"
 
@@ -290,11 +291,40 @@ static void bs_hyc_close(struct scsi_lu *lup)
 	close(lup->fd);
 }
 
+enum {
+	Opt_vmdkid, Opt_err,
+};
+
+static match_table_t bs_hyc_opts = {
+	{Opt_vmdkid, "vmdkid=%s"},
+	{Opt_err, NULL},
+};
+
 static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 {
 	struct bs_hyc_info *infop = BS_HYC_I(lup);
 	tgtadm_err          e = TGTADM_SUCCESS;
 	int                 rc;
+	char               *p;
+	char               *vmdkid = NULL;
+
+	while((p = strsep(&bsoptsp, ",")) != NULL) {
+		substring_t args[MAX_OPT_ARGS];
+		int token;
+		if (!*p)
+			continue;
+		token = match_token(p, bs_hyc_opts, args);
+		switch (token) {
+		case Opt_vmdkid:
+			vmdkid = match_strdup(&args[0]);
+		default:
+			break;
+		}
+	}
+	if (!vmdkid) {
+		eprintf("hyc bst needs vmdkid as bsopts\n");
+		return TGTADM_INVALID_REQUEST;
+	}
 
 	memset(infop, 0, sizeof(*infop));
 
@@ -302,11 +332,10 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 
 	assert(lup->tgt);
 	assert(lup->tgt->vmid);
-	assert(lup->vmdkid);
 
 	infop->vmid = lup->tgt->vmid;
-	infop->vmdkid = lup->vmdkid;
-	infop->vmdk = GetVmdkHandle(infop->vmdkid);
+	infop->vmdkid = vmdkid;
+	infop->vmdk = GetVmdkHandle(vmdkid);
 	assert(infop->vmdk != kInvalidVmdkHandle);
 
 	rc = pthread_mutex_init(&infop->lock, NULL);
@@ -336,6 +365,7 @@ static void bs_hyc_exit(struct scsi_lu *lup)
 	assert(DLL_ISEMPTY(&infop->sched_cmd_list));
 
 	free(infop->request_resultsp);
+	free(infop->vmdkid);
 
 	rc = pthread_mutex_destroy(&infop->lock);
 

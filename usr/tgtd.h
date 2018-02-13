@@ -200,7 +200,6 @@ struct scsi_lu {
 	uint64_t size;
 	uint64_t lun;
 	char *path;
-	char *vmdkid; /* Each LUN is associated with VMDK */
 	int bsoflags;
 	unsigned int blk_shift;
 

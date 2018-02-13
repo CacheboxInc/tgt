@@ -462,7 +462,7 @@ __device_lookup(int tid, uint64_t lun, struct target **t)
 
 enum {
 	Opt_path, Opt_bstype, Opt_bsopts, Opt_bsoflags, Opt_blocksize,
-	Opt_vmdkid, Opt_err,
+	Opt_err,
 };
 
 static match_table_t device_tokens = {
@@ -471,7 +471,6 @@ static match_table_t device_tokens = {
 	{Opt_bsopts, "bsopts=%s"},
 	{Opt_bsoflags, "bsoflags=%s"},
 	{Opt_blocksize, "blocksize=%s"},
-	{Opt_vmdkid, "vmdkid=%s"},
 	{Opt_err, NULL},
 };
 
@@ -481,7 +480,7 @@ tgtadm_err tgt_device_create(int tid, int dev_type, uint64_t lun, char *params,
 		      int backing)
 {
 	char *p, *path = NULL, *bstype = NULL, *bsopts = NULL;
-	char *bsoflags = NULL, *blocksize = NULL, *vmdkid = NULL;
+	char *bsoflags = NULL, *blocksize = NULL;
 	int lu_bsoflags = 0;
 	tgtadm_err adm_err = TGTADM_SUCCESS;
 	struct target *target;
@@ -516,9 +515,6 @@ tgtadm_err tgt_device_create(int tid, int dev_type, uint64_t lun, char *params,
 		case Opt_blocksize:
 			blocksize = match_strdup(&args[0]);
 			break;
-		case Opt_vmdkid:
-			vmdkid = match_strdup(&args[0]);
-
 		default:
 			break;
 		}
@@ -550,12 +546,6 @@ tgtadm_err tgt_device_create(int tid, int dev_type, uint64_t lun, char *params,
 		}
 	} else
 		bst = get_backingstore_template("null");
-
-	if (!strncmp(bst->bs_name, "hyc", 3) && vmdkid == NULL) {
-		eprintf("vmdkid for this lun %" PRIu64 " is not provided\n", lun);
-		adm_err = TGTADM_INVALID_REQUEST;
-		goto out;
-	}
 
 	if ((!strncmp(bst->bs_name, "bsg", 3) ||
 	     !strncmp(bst->bs_name, "sg", 2)) &&
@@ -647,14 +637,6 @@ tgtadm_err tgt_device_create(int tid, int dev_type, uint64_t lun, char *params,
 			goto fail_lu_init;
 	}
 
-	if (backing && vmdkid) {
-		lu->vmdkid = strdup(vmdkid);
-		if (!lu->vmdkid) {
-			adm_err = TGTADM_NOMEM;
-			goto fail_bs_init;
-		}
-	}
-
 	if (lu->bst->bs_init) {
 		if (bsopts)
 			dprintf("bsopts=%s\n", bsopts);
@@ -724,8 +706,6 @@ out:
 		free(path);
 	if (bsoflags)
 		free(bsoflags);
-	if (vmdkid)
-		free(vmdkid);
 	return adm_err;
 
 fail_bs_init:
@@ -770,10 +750,6 @@ tgtadm_err tgt_device_destroy(int tid, uint64_t lun, int force)
 
 	if (lu->bst->bs_exit)
 		lu->bst->bs_exit(lu);
-
-	if (lu->vmdkid) {
-		free(lu->vmdkid);
-	}
 
 	list_for_each_entry(itn, &target->it_nexus_list, nexus_siblings) {
 		list_for_each_entry_safe(itn_lu, next, &itn->itn_itl_info_list,
