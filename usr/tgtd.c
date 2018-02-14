@@ -42,7 +42,6 @@
 #include "work.h"
 #include "util.h"
 
-#include <stdbool.h>
 #include "TgtInterface.h"
 #include "HycRestServer.h"
 

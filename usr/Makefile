@@ -37,6 +37,7 @@ LIBS += -libverbs -lrdmacm
 endif
 
 INCLUDES += -I.
+INCLUDES +=-I/usr/local/include/hyc/include/
 
 CFLAGS += -D_GNU_SOURCE
 CFLAGS += $(INCLUDES)
