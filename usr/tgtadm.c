@@ -685,7 +685,7 @@ int main(int argc, char **argv)
 		}
 		switch (op) {
 		case OP_NEW:
-			rc = verify_mode_params(argc, argv, "LmotTCX");
+			rc = verify_mode_params(argc, argv, "LmotTC");
 			if (rc) {
 				eprintf("target mode: option '-%c' is not "
 					"allowed/supported\n", rc);
@@ -831,7 +831,7 @@ int main(int argc, char **argv)
 		}
 		switch (op) {
 		case OP_NEW:
-			rc = verify_mode_params(argc, argv, "LmofytlbEYCSZ");
+			rc = verify_mode_params(argc, argv, "LmofytlbEYCS");
 			if (rc) {
 				eprintf("logicalunit mode: option '-%c' is not "
 					  "allowed/supported\n", rc);

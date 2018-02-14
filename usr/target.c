@@ -2132,11 +2132,10 @@ tgtadm_err tgt_target_create(int lld, int tid, char *args)
 		if (str) {
 			*str++ = '\0';
 
-			if (!strcmp("targetname", q)) {
+			if (!strcmp("targetname", q))
 				targetname = str;
-			} else {
+			else
 				eprintf("Unknow option %s\n", q);
-			}
 		}
 	};
 

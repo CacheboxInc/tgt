@@ -36,13 +36,13 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
-#include <stdbool.h>
 #include "list.h"
 #include "tgtd.h"
 #include "driver.h"
 #include "work.h"
 #include "util.h"
 
+#include <stdbool.h>
 #include "TgtInterface.h"
 #include "HycRestServer.h"
 
