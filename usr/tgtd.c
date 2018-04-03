@@ -44,6 +44,8 @@
 
 #include "TgtInterface.h"
 
+#include "halib.h"
+
 unsigned long pagesize, pageshift;
 
 int system_active = 1;
@@ -51,6 +53,9 @@ static int ep_fd;
 static char program_name[] = "tgtd";
 static LIST_HEAD(tgt_events_list);
 static LIST_HEAD(tgt_sched_events_list);
+
+static pthread_t ha_hb_tid;
+static struct _ha_instance *ha;
 
 static struct option const long_options[] = {
 	{"foreground", no_argument, 0, 'f'},
@@ -519,6 +524,99 @@ static int parse_params(char *name, char *p)
 	return -1;
 }
 
+void *ha_heartbeat(void *arg)
+{
+	struct _ha_instance *ha = (struct _ha_instance *) arg;
+
+	while (1) {
+		ha_healthupdate(ha);
+		sleep(60);
+	}
+}
+
+enum tgt_svc_err {
+	TGT_ERR_INVALID_PARAM = 1,
+	TGT_ERR_TARGET_CREATE,
+};
+
+static void set_err_msg(_ha_response *resp, enum tgt_svc_err err,
+	char *msg)
+{
+	char *err_msg = ha_get_error_message(ha, err, msg);
+	ha_set_response_body(resp, HTTP_STATUS_ERR, err_msg,
+		strlen(err_msg) + 1);
+	free(err_msg);
+}
+
+static int exec(char *cmd)
+{
+	FILE *filp = NULL;
+	int ret = 0;
+	int status = 0;
+
+	fprintf(stdout, "Executing cmd: %s", cmd);
+
+	filp = popen(cmd, "r");
+	if (filp == NULL) {
+		fprintf(stderr, "popen failed");
+		return -1;
+	}
+
+	ret = pclose(filp);
+	status = WEXITSTATUS(ret);
+
+	return status;
+}
+
+static int target_create(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	char cmd[512];
+	const char *tid = ha_parameter_get(reqp, "tid");
+	int rc = 0;
+
+	if (tid == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"tid param not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	memset(cmd, 0, sizeof(cmd));
+	snprintf(cmd, sizeof(cmd), "tgtadm --lld iscsi --mode target --op new"
+		" --tid=%s --targetname=%s", tid, "disk1");
+	rc = exec(cmd);
+
+	if (rc) {
+		set_err_msg(resp, TGT_ERR_TARGET_CREATE,
+			"target create failed");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	return HA_CALLBACK_CONTINUE;
+}
+
+static int lun_create(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	return HA_CALLBACK_CONTINUE;
+}
+
+int tgt_ha_start_cb(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	fprintf(stdout, "Enter: Start callback\n");
+	struct _ha_instance *hap = (struct _ha_instance *) userp;
+
+	pthread_create(&ha_hb_tid, NULL, &ha_heartbeat, (void *)hap);
+	return HA_CALLBACK_CONTINUE;
+}
+
+int tgt_ha_stop_cb(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	return HA_CALLBACK_CONTINUE;
+}
+
 int main(int argc, char **argv)
 {
 	struct sigaction sa_old;
@@ -527,7 +625,14 @@ int main(int argc, char **argv)
 	int is_daemon = 1, is_debug = 0;
 	int ret;
 	char *hyc_argv[1] = {"tgtd"};
+	struct ha_handlers *ep_handlers = malloc(sizeof(struct ha_handlers) +
+		2 * sizeof(struct ha_endpoint_handlers));
+	char *etcd_ip = NULL;
+	char *svc_label = NULL;
+	char *tgt_version = NULL;
 
+	if (ep_handlers == NULL)
+		exit(1);
 	sa_new.sa_handler = signal_catch;
 	sigemptyset(&sa_new.sa_mask);
 	sa_new.sa_flags = 0;
@@ -540,6 +645,20 @@ int main(int argc, char **argv)
 			break;
 
 	opterr = 0;
+
+	ep_handlers->ha_endpoints[0].ha_http_method = POST;
+	strncpy(ep_handlers->ha_endpoints[0].ha_url_endpoint, "target_create",
+		strlen("target_create") + 1);
+	ep_handlers->ha_endpoints[0].callback_function = target_create;
+	ep_handlers->ha_endpoints[0].ha_user_data = NULL;
+	ep_handlers->ha_count = 1;
+
+	ep_handlers->ha_endpoints[1].ha_http_method = POST;
+	strncpy(ep_handlers->ha_endpoints[1].ha_url_endpoint, "lun_create",
+		strlen("lun_create") + 1);
+	ep_handlers->ha_endpoints[1].callback_function = lun_create;
+	ep_handlers->ha_endpoints[1].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
 
 	HycStorInitialize(1, hyc_argv);
 
@@ -570,6 +689,16 @@ int main(int argc, char **argv)
 		case 'h':
 			usage(0);
 			break;
+		case 'e':
+			etcd_ip = strdup(optarg);
+			break;
+		case 's':
+			svc_label = strdup(optarg);
+			break;
+		case 'v':
+			tgt_version = strdup(optarg);
+			break;
+			
 		default:
 			if (strncmp(argv[optind - 1], "--", 2))
 				usage(1);
@@ -582,6 +711,27 @@ int main(int argc, char **argv)
 		}
 	}
 
+	if ((etcd_ip == NULL) || (svc_label == NULL) ||
+		(tgt_version == NULL)) {
+		free(etcd_ip);
+		free(svc_label);
+		free(tgt_version);
+		free(ep_handlers);
+		usage(0);
+		exit(1);
+	}
+
+	ha = ha_initialize(etcd_ip, svc_label, tgt_version, 120,
+			ep_handlers, tgt_ha_start_cb, tgt_ha_stop_cb);
+
+	if (ha == NULL) {
+		free(etcd_ip);
+		free(svc_label);
+		free(tgt_version);
+		free(ep_handlers);
+		exit(1);
+	}
+	
 	ep_fd = epoll_create(4096);
 	if (ep_fd < 0) {
 		fprintf(stderr, "can't create epoll fd, %m\n");
