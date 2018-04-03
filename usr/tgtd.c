@@ -64,10 +64,13 @@ static struct option const long_options[] = {
 	{"debug", required_argument, 0, 'd'},
 	{"version", no_argument, 0, 'V'},
 	{"help", no_argument, 0, 'h'},
+	{"etcd_ip", required_argument, 0, 'e'},
+	{"svc_label", required_argument, 0, 's'},
+	{"version_for_ha", required_argument, 0, 'v'},
 	{0, 0, 0, 0},
 };
 
-static char *short_options = "fC:d:t:Vh";
+static char *short_options = "fC:d:t:Vhe:s:v:";
 static char *spare_args;
 
 static void usage(int status)
@@ -575,6 +578,7 @@ static int target_create(const _ha_request *reqp,
 	const char *tid = ha_parameter_get(reqp, "tid");
 	int rc = 0;
 
+	fprintf(stdout, "Enter target_create rest api\n");
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"tid param not given");
@@ -614,6 +618,7 @@ int tgt_ha_start_cb(const _ha_request *reqp,
 int tgt_ha_stop_cb(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
+	fprintf(stdout, "Enter: Stop callback\n");
 	return HA_CALLBACK_CONTINUE;
 }
 
@@ -691,14 +696,16 @@ int main(int argc, char **argv)
 			break;
 		case 'e':
 			etcd_ip = strdup(optarg);
+			fprintf(stdout, "etcd_ip=%s\n", etcd_ip);
 			break;
 		case 's':
 			svc_label = strdup(optarg);
+			fprintf(stdout, "svc_label=%s\n", svc_label);
 			break;
 		case 'v':
 			tgt_version = strdup(optarg);
+			fprintf(stdout, "tgt_version=%s\n", tgt_version);
 			break;
-			
 		default:
 			if (strncmp(argv[optind - 1], "--", 2))
 				usage(1);
@@ -725,6 +732,7 @@ int main(int argc, char **argv)
 			ep_handlers, tgt_ha_start_cb, tgt_ha_stop_cb);
 
 	if (ha == NULL) {
+		fprintf(stdout, "ha_initilize failed\n");
 		free(etcd_ip);
 		free(svc_label);
 		free(tgt_version);
