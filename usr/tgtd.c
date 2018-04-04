@@ -88,6 +88,9 @@ static void usage(int status)
 		"-t, --nr_iothreads NNNN specify the number of I/O threads\n"
 		"-d, --debug debuglevel  print debugging information\n"
 		"-V, --version           print version and exit\n"
+		"-e, --etcd_ip           give etcd_ip to configure ha-lib with\n"
+		"-s, --svc_label         service label needed for ha-lib\n"
+		"-v, --version_for_ha    tgt version used by ha-lib\n"
 		"-h, --help              display this help and exit\n",
 		TGT_VERSION, program_name);
 	exit(0);
@@ -529,10 +532,12 @@ static int parse_params(char *name, char *p)
 
 void *ha_heartbeat(void *arg)
 {
-	struct _ha_instance *ha = (struct _ha_instance *) arg;
+	struct _ha_instance *hap = (struct _ha_instance *) arg;
 
 	while (1) {
-		ha_healthupdate(ha);
+		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, 0);
+		ha_healthupdate(hap);
+		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, 0);
 		sleep(60);
 	}
 }
@@ -540,6 +545,13 @@ void *ha_heartbeat(void *arg)
 enum tgt_svc_err {
 	TGT_ERR_INVALID_PARAM = 1,
 	TGT_ERR_TARGET_CREATE,
+	TGT_ERR_NO_DATA,
+	TGT_ERR_INVALID_JSON,
+	TGT_ERR_INVALID_TARGET_NAME,
+	TGT_ERR_INVALID_LUN_PATH,
+	TGT_ERR_INVALID_VMID,
+	TGT_ERR_INVALID_VMDKID,
+	TGT_ERR_LUN_CREATE,
 };
 
 static void set_err_msg(_ha_response *resp, enum tgt_svc_err err,
@@ -557,11 +569,10 @@ static int exec(char *cmd)
 	int ret = 0;
 	int status = 0;
 
-	fprintf(stdout, "Executing cmd: %s", cmd);
+	fprintf(stdout, "Executing cmd: %s\n", cmd);
 
 	filp = popen(cmd, "r");
 	if (filp == NULL) {
-		fprintf(stderr, "popen failed");
 		return -1;
 	}
 
@@ -577,6 +588,7 @@ static int target_create(const _ha_request *reqp,
 	char cmd[512];
 	const char *tid = ha_parameter_get(reqp, "tid");
 	int rc = 0;
+	char *data = NULL;
 
 	fprintf(stdout, "Enter target_create rest api\n");
 	if (tid == NULL) {
@@ -585,9 +597,33 @@ static int target_create(const _ha_request *reqp,
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	data = ha_get_data(reqp);
+	if (data == NULL) {
+		set_err_msg(resp, TGT_ERR_NO_DATA,
+			"json config not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_error_t error;
+	json_t *root = json_loads(data, 0, &error);
+
+	free(data);
+	if (root == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_JSON,
+			"json config is incorrect");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *tname = json_object_get(root, "TargetName");
+	if (!json_is_string(tname)) {
+		set_err_msg(resp, TGT_ERR_INVALID_TARGET_NAME,
+			"TargetName is not string");
+		return HA_CALLBACK_CONTINUE;
+	}
+
 	memset(cmd, 0, sizeof(cmd));
 	snprintf(cmd, sizeof(cmd), "tgtadm --lld iscsi --mode target --op new"
-		" --tid=%s --targetname=%s", tid, "disk1");
+		" --tid=%s --targetname=%s", tid, json_string_value(tname));
 	rc = exec(cmd);
 
 	if (rc) {
@@ -595,6 +631,7 @@ static int target_create(const _ha_request *reqp,
 			"target create failed");
 		return HA_CALLBACK_CONTINUE;
 	}
+	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
 	return HA_CALLBACK_CONTINUE;
 }
@@ -602,6 +639,77 @@ static int target_create(const _ha_request *reqp,
 static int lun_create(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
+	char cmd[512];
+	const char *tid = ha_parameter_get(reqp, "tid");
+	const char *lid = ha_parameter_get(reqp, "lid");
+	int rc = 0;
+	char *data = NULL;
+
+	fprintf(stdout, "Enter lun_create rest api\n");
+	if (tid == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"tid param not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	if (lid == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"lid param not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	data = ha_get_data(reqp);
+	if (data == NULL) {
+		set_err_msg(resp, TGT_ERR_NO_DATA,
+			"json config not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_error_t error;
+	json_t *root = json_loads(data, 0, &error);
+
+	free(data);
+	if (root == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_JSON,
+			"json config is incorrect");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *dev_path = json_object_get(root, "DevPath");
+	if (!json_is_string(dev_path)) {
+		set_err_msg(resp, TGT_ERR_INVALID_LUN_PATH,
+			"DevPath is not string");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *vmid = json_object_get(root, "VmID");
+	if (!json_is_string(vmid)) {
+		set_err_msg(resp, TGT_ERR_INVALID_VMID,
+			"VmID is not string");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *vmdkid = json_object_get(root, "VmdkID");
+	if (!json_is_string(vmdkid)) {
+		set_err_msg(resp, TGT_ERR_INVALID_VMDKID,
+			"VmdkID is not string");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	memset(cmd, 0, sizeof(cmd));
+	snprintf(cmd, sizeof(cmd), "tgtadm --lld iscsi --mode logicalunit --op new"
+		" --tid=%s --lun=%s -b %s --bstype hyc --bsopts vmid=%s:vmdkid=%s",
+		tid, lid, json_string_value(dev_path), json_string_value(vmid),
+		json_string_value(vmdkid));
+	rc = exec(cmd);
+
+	if (rc) {
+		set_err_msg(resp, TGT_ERR_LUN_CREATE,
+			"target create failed");
+		return HA_CALLBACK_CONTINUE;
+	}
+	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
+
 	return HA_CALLBACK_CONTINUE;
 }
 
@@ -619,6 +727,8 @@ int tgt_ha_stop_cb(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
 	fprintf(stdout, "Enter: Stop callback\n");
+	pthread_cancel(ha_hb_tid);
+
 	return HA_CALLBACK_CONTINUE;
 }
 
