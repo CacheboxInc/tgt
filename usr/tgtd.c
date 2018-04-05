@@ -67,10 +67,11 @@ static struct option const long_options[] = {
 	{"etcd_ip", required_argument, 0, 'e'},
 	{"svc_label", required_argument, 0, 's'},
 	{"version_for_ha", required_argument, 0, 'v'},
+	{"ha_svc_port", required_argument, 0, 'p'},
 	{0, 0, 0, 0},
 };
 
-static char *short_options = "fC:d:t:Vhe:s:v:";
+static char *short_options = "fC:d:t:Vhe:s:v:p:";
 static char *spare_args;
 
 static void usage(int status)
@@ -88,6 +89,7 @@ static void usage(int status)
 		"-t, --nr_iothreads NNNN specify the number of I/O threads\n"
 		"-d, --debug debuglevel  print debugging information\n"
 		"-V, --version           print version and exit\n"
+		"-p, --ha_svc_port       HA service port number\n"
 		"-e, --etcd_ip           give etcd_ip to configure ha-lib with\n"
 		"-s, --svc_label         service label needed for ha-lib\n"
 		"-v, --version_for_ha    tgt version used by ha-lib\n"
@@ -745,6 +747,7 @@ int main(int argc, char **argv)
 	char *etcd_ip = NULL;
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
+	int ha_svc_port = 0;
 
 	if (ep_handlers == NULL)
 		exit(1);
@@ -804,6 +807,11 @@ int main(int argc, char **argv)
 		case 'h':
 			usage(0);
 			break;
+		case 'p':
+			ret = str_to_int_range(optarg, ha_svc_port, 1, 32768);
+			if (ret)
+				bad_optarg(ret, ch, optarg);
+			break;
 		case 'e':
 			etcd_ip = strdup(optarg);
 			fprintf(stdout, "etcd_ip=%s\n", etcd_ip);
@@ -829,7 +837,7 @@ int main(int argc, char **argv)
 	}
 
 	if ((etcd_ip == NULL) || (svc_label == NULL) ||
-		(tgt_version == NULL)) {
+		(tgt_version == NULL) || (ha_svc_port == 0)) {
 		free(etcd_ip);
 		free(svc_label);
 		free(tgt_version);
@@ -838,7 +846,7 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	ha = ha_initialize(etcd_ip, svc_label, tgt_version, 120,
+	ha = ha_initialize(ha_svc_port, etcd_ip, svc_label, tgt_version, 120,
 			ep_handlers, tgt_ha_start_cb, tgt_ha_stop_cb);
 
 	if (ha == NULL) {
