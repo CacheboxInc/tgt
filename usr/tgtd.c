@@ -607,7 +607,7 @@ static int target_create(const _ha_request *reqp,
 	}
 
 	json_error_t error;
-	json_t *root = json_loads(data, 0, &error);
+	json_auto_t *root = json_loads(data, 0, &error);
 
 	free(data);
 	if (root == NULL) {
@@ -668,7 +668,7 @@ static int lun_create(const _ha_request *reqp,
 	}
 
 	json_error_t error;
-	json_t *root = json_loads(data, 0, &error);
+	json_auto_t *root = json_loads(data, 0, &error);
 
 	free(data);
 	if (root == NULL) {
