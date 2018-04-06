@@ -68,10 +68,12 @@ static struct option const long_options[] = {
 	{"svc_label", required_argument, 0, 's'},
 	{"version_for_ha", required_argument, 0, 'v'},
 	{"ha_svc_port", required_argument, 0, 'p'},
+	{"stord_ip", required_argument, 0, 'D'},
+	{"stord_port", required_argument, 0, 'P'},
 	{0, 0, 0, 0},
 };
 
-static char *short_options = "fC:d:t:Vhe:s:v:p:";
+static char *short_options = "fC:d:t:Vhe:s:v:p:D:P:";
 static char *spare_args;
 
 static void usage(int status)
@@ -93,6 +95,7 @@ static void usage(int status)
 		"-e, --etcd_ip           give etcd_ip to configure ha-lib with\n"
 		"-s, --svc_label         service label needed for ha-lib\n"
 		"-v, --version_for_ha    tgt version used by ha-lib\n"
+		"-D, --stord_ip          stord ip address to connect with\n"
 		"-h, --help              display this help and exit\n",
 		TGT_VERSION, program_name);
 	exit(0);
@@ -748,6 +751,8 @@ int main(int argc, char **argv)
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
 	int ha_svc_port = 0;
+	char *stord_ip = NULL;
+	uint16_t stord_port = 0;
 
 	if (ep_handlers == NULL)
 		exit(1);
@@ -777,8 +782,6 @@ int main(int argc, char **argv)
 	ep_handlers->ha_endpoints[1].callback_function = lun_create;
 	ep_handlers->ha_endpoints[1].ha_user_data = NULL;
 	ep_handlers->ha_count += 1;
-
-	HycStorInitialize(1, hyc_argv);
 
 	while ((ch = getopt_long(argc, argv, short_options, long_options,
 				 &longindex)) >= 0) {
@@ -824,6 +827,15 @@ int main(int argc, char **argv)
 			tgt_version = strdup(optarg);
 			fprintf(stdout, "tgt_version=%s\n", tgt_version);
 			break;
+		case 'D':
+			stord_ip = strdup(optarg);
+			fprintf(stdout, "stord_ip=%s\n", stord_ip);
+			break;
+		case 'P':
+			ret = str_to_int_range(optarg, stord_port, 1, 32768);
+			if (ret)
+				bad_optarg(ret, ch, optarg);
+			break;
 		default:
 			if (strncmp(argv[optind - 1], "--", 2))
 				usage(1);
@@ -837,14 +849,18 @@ int main(int argc, char **argv)
 	}
 
 	if ((etcd_ip == NULL) || (svc_label == NULL) ||
-		(tgt_version == NULL) || (ha_svc_port == 0)) {
+		(tgt_version == NULL) || (ha_svc_port == 0) ||
+		(stord_ip == NULL) || (stord_port == 0)) {
 		free(etcd_ip);
 		free(svc_label);
 		free(tgt_version);
 		free(ep_handlers);
+		free(stord_ip);
 		usage(0);
 		exit(1);
 	}
+
+	HycStorInitialize(1, hyc_argv, stord_ip, stord_port);
 
 	ha = ha_initialize(ha_svc_port, etcd_ip, svc_label, tgt_version, 120,
 			ep_handlers, tgt_ha_start_cb, tgt_ha_stop_cb);
@@ -855,9 +871,11 @@ int main(int argc, char **argv)
 		free(svc_label);
 		free(tgt_version);
 		free(ep_handlers);
+		free(stord_ip);
 		exit(1);
 	}
 	
+
 	ep_fd = epoll_create(4096);
 	if (ep_fd < 0) {
 		fprintf(stderr, "can't create epoll fd, %m\n");
@@ -912,6 +930,7 @@ int main(int argc, char **argv)
 	free(svc_label);
 	free(tgt_version);
 	free(ep_handlers);
+	free(stord_ip);
 
 	log_close();
 
