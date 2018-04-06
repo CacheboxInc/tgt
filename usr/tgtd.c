@@ -908,6 +908,11 @@ int main(int argc, char **argv)
 
 	ipc_exit();
 
+	free(etcd_ip);
+	free(svc_label);
+	free(tgt_version);
+	free(ep_handlers);
+
 	log_close();
 
 	return 0;
