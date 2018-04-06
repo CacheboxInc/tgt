@@ -574,8 +574,6 @@ static int exec(char *cmd)
 	int ret = 0;
 	int status = 0;
 
-	fprintf(stdout, "Executing cmd: %s\n", cmd);
-
 	filp = popen(cmd, "r");
 	if (filp == NULL) {
 		return -1;
@@ -595,7 +593,6 @@ static int target_create(const _ha_request *reqp,
 	int rc = 0;
 	char *data = NULL;
 
-	fprintf(stdout, "Enter target_create rest api\n");
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"tid param not given");
@@ -650,7 +647,6 @@ static int lun_create(const _ha_request *reqp,
 	int rc = 0;
 	char *data = NULL;
 
-	fprintf(stdout, "Enter lun_create rest api\n");
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"tid param not given");
@@ -721,7 +717,6 @@ static int lun_create(const _ha_request *reqp,
 int tgt_ha_start_cb(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
-	fprintf(stdout, "Enter: Start callback\n");
 	struct _ha_instance *hap = (struct _ha_instance *) userp;
 
 	pthread_create(&ha_hb_tid, NULL, &ha_heartbeat, (void *)hap);
@@ -731,9 +726,9 @@ int tgt_ha_start_cb(const _ha_request *reqp,
 int tgt_ha_stop_cb(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
-	fprintf(stdout, "Enter: Stop callback\n");
 	pthread_cancel(ha_hb_tid);
 
+	pthread_join(ha_hb_tid, NULL);
 	return HA_CALLBACK_CONTINUE;
 }
 
@@ -817,19 +812,15 @@ int main(int argc, char **argv)
 			break;
 		case 'e':
 			etcd_ip = strdup(optarg);
-			fprintf(stdout, "etcd_ip=%s\n", etcd_ip);
 			break;
 		case 's':
 			svc_label = strdup(optarg);
-			fprintf(stdout, "svc_label=%s\n", svc_label);
 			break;
 		case 'v':
 			tgt_version = strdup(optarg);
-			fprintf(stdout, "tgt_version=%s\n", tgt_version);
 			break;
 		case 'D':
 			stord_ip = strdup(optarg);
-			fprintf(stdout, "stord_ip=%s\n", stord_ip);
 			break;
 		case 'P':
 			ret = str_to_int_range(optarg, stord_port, 1, 32768);
@@ -866,7 +857,7 @@ int main(int argc, char **argv)
 			ep_handlers, tgt_ha_start_cb, tgt_ha_stop_cb);
 
 	if (ha == NULL) {
-		fprintf(stdout, "ha_initilize failed\n");
+		fprintf(stderr, "ha_initilize failed\n");
 		free(etcd_ip);
 		free(svc_label);
 		free(tgt_version);
@@ -879,39 +870,53 @@ int main(int argc, char **argv)
 	ep_fd = epoll_create(4096);
 	if (ep_fd < 0) {
 		fprintf(stderr, "can't create epoll fd, %m\n");
+		ha_deinitialize(ha);
 		exit(1);
 	}
 
 	spare_args = optind < argc ? argv[optind] : NULL;
 
-	if (is_daemon && daemon(0, 0))
+	if (is_daemon && daemon(0, 0)) {
+		ha_deinitialize(ha);
 		exit(1);
+	}
 
 	err = ipc_init();
-	if (err)
+	if (err) {
+		ha_deinitialize(ha);
 		exit(1);
+	}
 
 	err = log_init(program_name, LOG_SPACE_SIZE, is_daemon, is_debug);
-	if (err)
+	if (err) {
+		ha_deinitialize(ha);
 		exit(1);
+	}
 
 	nr_lld = lld_init();
 	if (!nr_lld) {
+		ha_deinitialize(ha);
 		fprintf(stderr, "No available low level driver!\n");
 		exit(1);
 	}
 
 	err = oom_adjust();
-	if (err && (errno != EACCES) && getuid() == 0)
+	if (err && (errno != EACCES) && getuid() == 0) {
+		ha_deinitialize(ha);
 		exit(1);
+	}
 
 	err = nr_file_adjust();
-	if (err)
+	if (err) {
+		ha_deinitialize(ha);
 		exit(1);
+	}
 
 	err = work_timer_start();
-	if (err)
+	if (err) {
+		ha_deinitialize(ha);
 		exit(1);
+	}
 
 	bs_init();
 
@@ -933,6 +938,8 @@ int main(int argc, char **argv)
 	free(stord_ip);
 
 	log_close();
+
+	ha_deinitialize(ha);
 
 	return 0;
 }
