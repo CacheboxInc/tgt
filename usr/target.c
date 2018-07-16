@@ -1090,7 +1090,7 @@ static int cmd_enabled(struct tgt_cmd_queue *q, struct scsi_cmd *cmd)
 
 static void cmd_post_perform(struct tgt_cmd_queue *q, struct scsi_cmd *cmd)
 {
-	dprintf("[SumitK] cmd_post_perform , offset is : %"PRIu64"\n", cmd->offset);
+	dprintf("cmd_post_perform , offset is : %"PRIu64"\n", cmd->offset);
 	q->active_cmd++;
 	switch (cmd->attribute) {
 	case MSG_ORDERED_TAG:
@@ -1288,7 +1288,7 @@ static void __cmd_done(struct target *target, struct scsi_cmd *cmd)
 		scsi_get_in_buffer(cmd), scsi_get_out_length(cmd),
 		scsi_get_in_length(cmd));
 
-	dprintf("[SumitK] __cmd_done, offset is : %"PRIu64"\n", cmd->offset);
+	dprintf("__cmd_done, offset is : %"PRIu64"\n", cmd->offset);
 	q = &cmd->dev->cmd_queue;
 	q->active_cmd--;
 	switch (cmd->attribute) {
@@ -1330,8 +1330,7 @@ static int abort_cmd(struct target *target, struct mgmt_req *mreq,
 {
 	int err = 0;
 
-	eprintf("[SumitK] abort_cmd found %" PRIx64 " %lx offset is : %"PRIu64"\n", cmd->tag, cmd->state, cmd->offset);
-
+	dprintf("abort_cmd found %" PRIx64 " %lx offset is : %"PRIu64"\n", cmd->tag, cmd->state, cmd->offset);
 	if (cmd_processed(cmd)) {
 		/*
 		 * We've already sent this command to kernel space.
@@ -1339,11 +1338,11 @@ static int abort_cmd(struct target *target, struct mgmt_req *mreq,
 		 * completion of this command.
 		 */
 
-		eprintf("[SumitK] abort_cmd cmd_processed is set, offset is : %"PRIu64"\n", cmd->offset);
+		dprintf("abort_cmd cmd_processed is set, offset is : %"PRIu64"\n", cmd->offset);
 		cmd->mreq = mreq;
 		err = -EBUSY;
 	} else {
-		eprintf("[SumitK] abort_cmd cmd_processed is not, set offset is : %"PRIu64"\n", cmd->offset);
+		dprintf("abort_cmd cmd_processed is not, set offset is : %"PRIu64"\n", cmd->offset);
 		cmd->dev->cmd_done(target, cmd);
 		target_cmd_io_done(cmd, TASK_ABORTED);
 	}
@@ -1356,8 +1355,6 @@ static int abort_task_set(struct mgmt_req *mreq, struct target *target,
 	struct scsi_cmd *cmd, *tmp;
 	struct it_nexus *itn;
 	int err, count = 0;
-
-	eprintf("[Sumitk] found %" PRIx64 " %d\n", tag, all);
 
 	list_for_each_entry(itn, &target->it_nexus_list, nexus_siblings) {
 		list_for_each_entry_safe(cmd, tmp, &itn->cmd_list, c_hlist) {

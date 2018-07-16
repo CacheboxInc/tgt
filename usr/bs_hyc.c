@@ -214,7 +214,6 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 		reqid = HycScheduleWrite(infop->rpc_con, cmdp, bufp, length, offset);
 		break;
 	case WRITE_SAME_OP:
-		/** TODO */
 	case UNKNOWN:
 	default:
 		assert(0);
@@ -222,8 +221,8 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 
 	/* If we got reqid, set it in hyc_cmd */
 	if (hyc_unlikely(reqid == kInvalidRequestID)) {
-		eprintf("request submission got error invalid request" 
-			" size: %lu offset : %"PRIu64" opcode :%u\n", 
+		eprintf("request submission got error invalid request"
+			" size: %lu offset : %"PRIu64" opcode :%u\n",
 			length, offset, (unsigned int) cmdp->scb[0]);
 		clear_cmd_async(cmdp);
 		remove_cmd_from_list(cmdp, infop);
