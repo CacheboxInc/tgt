@@ -21,6 +21,9 @@ struct bs_hyc_info {
 	int                    done_eventfd;
 	struct RequestResult  *request_resultsp;
 	uint32_t               nr_results;
+
+	struct list_head cmd_list;
+	pthread_mutex_t  lock;
 };
 
 #endif

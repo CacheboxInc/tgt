@@ -49,6 +49,7 @@ struct scsi_cmd {
 
 	struct list_head bs_list;
 
+	struct list_head hyc_cmd_list;
 	struct it_nexus *it_nexus;
 	struct it_nexus_lu_info *itn_lu_info;
 };

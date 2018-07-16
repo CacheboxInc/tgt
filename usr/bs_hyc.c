@@ -30,7 +30,7 @@ static inline struct bs_hyc_info *BS_HYC_I(struct scsi_lu *lu)
 	return (struct bs_hyc_info *) ((char *)lu + sizeof (*lu));
 }
 
-io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
+static io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 {
 	unsigned int        scsi_op = (unsigned int) cmdp->scb[0];
 	io_type_t           op = UNKNOWN;
@@ -54,10 +54,8 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 		if (cmdp->scb[1] & 0x08) {
 			eprintf("Unmap with WRITE_SAME for hyc backend is not"
 				" supported yet.\n");
-			op = UNKNOWN;
-			goto out;
 		}
-		op = UNKNOWN;
+		op = WRITE_SAME_OP;
 		break;
 	case SYNCHRONIZE_CACHE:
 	case SYNCHRONIZE_CACHE_16:
@@ -65,7 +63,6 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 		eprintf("skipped cmd: %p op: %x\n", cmdp, scsi_op);
 		op = UNKNOWN;
 	}
-out:
 	return op;
 }
 
@@ -102,6 +99,65 @@ static char *scsi_cmd_buffer(struct scsi_cmd *cmdp)
 	}
 }
 
+int display_cmd_list (struct scsi_lu *lup) {
+	struct scsi_cmd *cmd, *next;
+	uint32_t count = 0;
+	struct list_head *list;
+	struct bs_hyc_info *infop = NULL;
+
+	infop = BS_HYC_I(lup);
+
+	pthread_mutex_lock(&infop->lock);
+	eprintf(" Displaying pending cmds:-\n");
+	list_for_each_entry_safe(cmd, next, &infop->cmd_list, hyc_cmd_list) {
+		eprintf("Pending cmd address : %p offset :: %"PRIu64" length : %u ops : %u\n", &cmd, cmd->offset,
+			scsi_cmd_length(cmd), (unsigned int) cmd->scb[0]);
+		count++;
+	}
+	pthread_mutex_unlock(&infop->lock);
+
+	if (0) {
+		list_for_each(list, &infop->cmd_list) {
+		cmd = list_entry(list, struct scsi_cmd, hyc_cmd_list);
+		eprintf("Pending cmd address : %p offset :: %"PRIu64" length : %u ops : %u\n", &cmd, cmd->offset,
+			scsi_cmd_length(cmd), (unsigned int) cmd->scb[0]);
+		}
+	}
+	return count;
+}
+
+static void add_cmd_in_list(struct scsi_cmd *cmdp, struct bs_hyc_info *infop) {
+
+	pthread_mutex_lock(&infop->lock);
+	INIT_LIST_HEAD(&cmdp->hyc_cmd_list);
+	list_add_tail(&cmdp->hyc_cmd_list, &infop->cmd_list);
+	if (0) {
+		pthread_mutex_unlock(&infop->lock);
+		display_cmd_list (cmdp->dev);
+	} else {
+		pthread_mutex_unlock(&infop->lock);
+	}
+}
+
+static void remove_cmd_from_list(struct scsi_cmd *cmdp, struct bs_hyc_info *infop) {
+
+	struct scsi_cmd *cmd, *next;
+	bool found = false;
+
+	pthread_mutex_lock(&infop->lock);
+	list_for_each_entry_safe(cmd, next, &infop->cmd_list, hyc_cmd_list) {
+		if (cmd == cmdp) {
+			list_del(&cmd->hyc_cmd_list);
+			found = true;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&infop->lock);
+	if (found == false) {
+		assert(0);
+	}
+}
+
 static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 {
 	struct scsi_lu     *lup = NULL;
@@ -118,12 +174,34 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 	assert(infop->rpc_con != kInvalidRpcHandle);
 
 	op = scsi_cmd_operation(cmdp);
-	if (hyc_unlikely(op == UNKNOWN)) {
+	if (hyc_unlikely(op == WRITE_SAME_OP)) {
 		return -EINVAL;
+	} else if (hyc_unlikely(op == UNKNOWN)) {
+		return 0;
 	}
 
 	offset = scsi_cmd_offset(cmdp);
 	length = scsi_cmd_length(cmdp);
+
+	/*
+	 * Simply returing from top for zero size IOs, we may need to handle
+	 * it later for the barrier IOs
+	 */
+
+	if(op == WRITE) {
+		if (!length) {
+			eprintf("Zero size write IO, returning from top :%lu\n", length);
+			return 0;
+		}
+	} else if(op == READ) {
+		if (!length) {
+			eprintf("Zero size read IO, returning from top :%lu\n", length);
+			return 0;
+		}
+	}
+
+	/* Add into cmd list */
+	add_cmd_in_list(cmdp, infop);
 
 	bufp = scsi_cmd_buffer(cmdp);
 	set_cmd_async(cmdp);
@@ -144,8 +222,12 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 
 	/* If we got reqid, set it in hyc_cmd */
 	if (hyc_unlikely(reqid == kInvalidRequestID)) {
-		eprintf("request submission got err invalid request\n");
-		target_cmd_io_done(cmdp, SAM_STAT_CHECK_CONDITION);
+		eprintf("request submission got error invalid request" 
+			" size: %lu offset : %"PRIu64" opcode :%u\n", 
+			length, offset, (unsigned int) cmdp->scb[0]);
+		clear_cmd_async(cmdp);
+		remove_cmd_from_list(cmdp, infop);
+		return -EINVAL;
 	}
 
 	return 0;
@@ -172,6 +254,7 @@ static void bs_hyc_handle_completion(int fd, int events, void *datap)
 			assert(cmdp);
 
 			assert(resultsp[i].result == 0);
+			remove_cmd_from_list(cmdp, infop);
 			target_cmd_io_done(cmdp, SAM_STAT_GOOD);
 		}
 		memset(resultsp, 0, sizeof(*resultsp) * nr_results);
@@ -275,6 +358,7 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	char               *p;
 	char               *vmdkid = NULL;
 	char               *vmid = NULL;
+	int rc;
 
 	assert(lup->tgt);
 
@@ -308,6 +392,14 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	infop->vmid = vmid;
 	infop->vmdkid = vmdkid;
 	infop->nr_results = 32;
+
+	INIT_LIST_HEAD(&infop->cmd_list);
+	rc = pthread_mutex_init(&infop->lock, NULL);
+	if (rc != 0) {
+		eprintf("%s: mutex lock init failed.\n", __func__);
+		return TGTADM_UNKNOWN_ERR;
+	}
+
 	infop->request_resultsp = calloc(infop->nr_results,
 		sizeof(*infop->request_resultsp));
 	if (!infop->request_resultsp) {
