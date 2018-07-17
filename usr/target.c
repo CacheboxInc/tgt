@@ -47,7 +47,9 @@
 static LIST_HEAD(device_type_list);
 
 static struct target global_target;
+#ifdef TRACK_HYC_CMDS
 extern uint32_t display_cmd_list (struct scsi_lu* );
+#endif
 
 int device_type_register(struct device_type_template *t)
 {
@@ -740,7 +742,9 @@ tgtadm_err tgt_device_destroy(int tid, uint64_t lun, int force)
 
 	if (!list_empty(&lu->cmd_queue.queue) || lu->cmd_queue.active_cmd) {
 		eprintf("Active cmd count : %u\n", lu->cmd_queue.active_cmd);
+#ifdef TRACK_HYC_CMDS
 		display_cmd_list (lu);
+#endif
 		return TGTADM_LUN_ACTIVE;
 	}
 

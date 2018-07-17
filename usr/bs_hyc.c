@@ -99,6 +99,7 @@ static char *scsi_cmd_buffer(struct scsi_cmd *cmdp)
 	}
 }
 
+#ifdef TRACK_HYC_CMDS
 int display_cmd_list (struct scsi_lu *lup) {
 	struct scsi_cmd *cmd, *next;
 	uint32_t count = 0;
@@ -157,6 +158,7 @@ static void remove_cmd_from_list(struct scsi_cmd *cmdp, struct bs_hyc_info *info
 		assert(0);
 	}
 }
+#endif
 
 static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 {
@@ -200,8 +202,10 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 		}
 	}
 
+#ifdef TRACK_HYC_CMDS
 	/* Add into cmd list */
 	add_cmd_in_list(cmdp, infop);
+#endif
 
 	bufp = scsi_cmd_buffer(cmdp);
 	set_cmd_async(cmdp);
@@ -225,7 +229,9 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 			" size: %lu offset : %"PRIu64" opcode :%u\n",
 			length, offset, (unsigned int) cmdp->scb[0]);
 		clear_cmd_async(cmdp);
+#ifdef TRACK_HYC_CMDS
 		remove_cmd_from_list(cmdp, infop);
+#endif
 		return -EINVAL;
 	}
 
@@ -253,7 +259,9 @@ static void bs_hyc_handle_completion(int fd, int events, void *datap)
 			assert(cmdp);
 
 			assert(resultsp[i].result == 0);
+#ifdef TRACK_HYC_CMDS
 			remove_cmd_from_list(cmdp, infop);
+#endif
 			target_cmd_io_done(cmdp, SAM_STAT_GOOD);
 		}
 		memset(resultsp, 0, sizeof(*resultsp) * nr_results);
@@ -357,7 +365,9 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	char               *p;
 	char               *vmdkid = NULL;
 	char               *vmid = NULL;
+#ifdef TRACK_HYC_CMDS
 	int rc;
+#endif
 
 	assert(lup->tgt);
 
@@ -392,12 +402,14 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	infop->vmdkid = vmdkid;
 	infop->nr_results = 32;
 
+#ifdef TRACK_HYC_CMDS
 	INIT_LIST_HEAD(&infop->cmd_list);
 	rc = pthread_mutex_init(&infop->lock, NULL);
 	if (rc != 0) {
 		eprintf("%s: mutex lock init failed.\n", __func__);
 		return TGTADM_UNKNOWN_ERR;
 	}
+#endif
 
 	infop->request_resultsp = calloc(infop->nr_results,
 		sizeof(*infop->request_resultsp));

@@ -12,7 +12,7 @@ typedef enum {
 	UNKNOWN,
 } io_type_t;
 
-/** This structure is per LUN/VMDK */
+/* This structure is per LUN/VMDK */
 struct bs_hyc_info {
 	struct scsi_lu        *lup;
 	char                  *vmid;
@@ -22,8 +22,10 @@ struct bs_hyc_info {
 	struct RequestResult  *request_resultsp;
 	uint32_t               nr_results;
 
+#ifdef TRACK_HYC_CMDS
 	struct list_head cmd_list;
 	pthread_mutex_t  lock;
+#endif
 };
 
 #endif
