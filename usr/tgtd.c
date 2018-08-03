@@ -615,12 +615,9 @@ static int target_create(const _ha_request *reqp,
 	int rc = 0;
 	char *data = NULL;
 
-	pthread_mutex_lock(&ha_rest_mutex);
-
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"tid param not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -628,7 +625,6 @@ static int target_create(const _ha_request *reqp,
 	if (data == NULL) {
 		set_err_msg(resp, TGT_ERR_NO_DATA,
 			"json config not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -639,7 +635,6 @@ static int target_create(const _ha_request *reqp,
 	if (root == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_JSON,
 			"json config is incorrect");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -647,7 +642,6 @@ static int target_create(const _ha_request *reqp,
 	if (!json_is_string(tname)) {
 		set_err_msg(resp, TGT_ERR_INVALID_TARGET_NAME,
 			"TargetName is not string");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -659,9 +653,10 @@ static int target_create(const _ha_request *reqp,
 	if (len >= sizeof(cmd)) {
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
 			"tgt cmd too long");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
+
+	pthread_mutex_lock(&ha_rest_mutex);
 	rc = exec(cmd);
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_TARGET_CREATE,
@@ -703,19 +698,15 @@ static int lun_create(const _ha_request *reqp,
 	int rc = 0;
 	char *data = NULL;
 
-	pthread_mutex_lock(&ha_rest_mutex);
-
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"tid param not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
 	if (lid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"lid param not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -723,7 +714,6 @@ static int lun_create(const _ha_request *reqp,
 	if (data == NULL) {
 		set_err_msg(resp, TGT_ERR_NO_DATA,
 			"json config not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -734,7 +724,6 @@ static int lun_create(const _ha_request *reqp,
 	if (root == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_JSON,
 			"json config is incorrect");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -742,7 +731,6 @@ static int lun_create(const _ha_request *reqp,
 	if (!json_is_string(dev_name)) {
 		set_err_msg(resp, TGT_ERR_INVALID_DEV_NAME,
 			"DevName is not string");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -750,7 +738,6 @@ static int lun_create(const _ha_request *reqp,
 	if (!json_is_string(lun_size)) {
 		set_err_msg(resp, TGT_ERR_INVALID_LUN_SIZE,
 			"Lun size is not json string");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -758,7 +745,6 @@ static int lun_create(const _ha_request *reqp,
 	if (!json_is_string(vmid)) {
 		set_err_msg(resp, TGT_ERR_INVALID_VMID,
 			"VmID is not string");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -766,7 +752,6 @@ static int lun_create(const _ha_request *reqp,
 	if (!json_is_string(vmdkid)) {
 		set_err_msg(resp, TGT_ERR_INVALID_VMDKID,
 			"VmdkID is not string");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -780,10 +765,10 @@ static int lun_create(const _ha_request *reqp,
 	if (len >= sizeof(cmd)) {
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
 			"mkdir cmd too long");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	pthread_mutex_lock(&ha_rest_mutex);
 	rc = exec(cmd);
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_SPARSE_FILE_DIR_CREATE,
@@ -866,13 +851,10 @@ static int new_stord(const _ha_request *reqp,
 	char *hyc_argv[1]   = {"tgtd"};
 	uint16_t stord_port = 0;
 
-	pthread_mutex_lock(&ha_rest_mutex);
-
 	data = ha_get_data(reqp);
 	if (data == NULL) {
 		set_err_msg(resp, TGT_ERR_NO_DATA,
 			"json config not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -884,7 +866,6 @@ static int new_stord(const _ha_request *reqp,
 	if (root == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_JSON,
 			"json config is incorrect");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -892,7 +873,6 @@ static int new_stord(const _ha_request *reqp,
 	if (!json_is_string(sip)) {
 		set_err_msg(resp, TGT_ERR_INVALID_STORD_IP,
 			"StordIp is not string");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -900,7 +880,6 @@ static int new_stord(const _ha_request *reqp,
 	if (!json_is_string(sport)) {
 		set_err_msg(resp, TGT_ERR_INVALID_STORD_PORT,
 			"StordPort is not string");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -914,12 +893,12 @@ static int new_stord(const _ha_request *reqp,
 	if (ret) {
 		set_err_msg(resp, TGT_ERR_INVALID_STORD_PORT,
 			"StordPort out of range");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 
 	}
 
 	//TODO: Add error handling for Stord init
+	pthread_mutex_lock(&ha_rest_mutex);
 	HycStorInitialize(1, hyc_argv, (char *)json_string_value(sip),
 			stord_port);
 
@@ -939,14 +918,11 @@ static int target_delete(const _ha_request *reqp,
 	int force = 0;
 	int retry;
 
-	pthread_mutex_lock(&ha_rest_mutex);
-
 	retry = RETRY;
 
 	if (tid == NULL || force_param == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"tid param not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -956,7 +932,6 @@ static int target_delete(const _ha_request *reqp,
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_INVALID_DELETE_FORCE,
 			"Invalid value of force param");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -967,9 +942,11 @@ static int target_delete(const _ha_request *reqp,
 	if (len >= sizeof(cmd)) {
 		set_err_msg(resp, TGT_ERR_STR_OUT_OF_RANGE,
 			"tgt unbind cmd #characters out of range");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
+
+	pthread_mutex_lock(&ha_rest_mutex);
+
 	//Ignoring error for now
 	rc = exec(cmd);
 	memset(cmd, 0, sizeof(cmd));
@@ -1066,20 +1043,16 @@ static int lun_delete(const _ha_request *reqp,
 
 	rc = 0;
 
-	pthread_mutex_lock(&ha_rest_mutex);
-
 	tid  = ha_parameter_get(reqp, "tid");
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"tid param not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 	lid  = ha_parameter_get(reqp, "lid");
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"lid param not given");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -1092,10 +1065,10 @@ static int lun_delete(const _ha_request *reqp,
 	if (len >= sizeof(cmd)) {
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
 			"tgt cmd too long");
-		pthread_mutex_unlock(&ha_rest_mutex);
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	pthread_mutex_lock(&ha_rest_mutex);
 	rc = exec(cmd);
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_LUN_DELETE,
