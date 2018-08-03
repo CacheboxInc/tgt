@@ -615,12 +615,7 @@ static int target_create(const _ha_request *reqp,
 	int rc = 0;
 	char *data = NULL;
 
-	rc = pthread_mutex_trylock(&ha_rest_mutex);
-	if (rc != 0) {
-		set_err_msg(resp, TGT_ERR_HA_BUSY,
-			"Another request being served. Try again later.");
-		return HA_CALLBACK_CONTINUE;
-	}
+	pthread_mutex_lock(&ha_rest_mutex);
 
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
@@ -708,12 +703,7 @@ static int lun_create(const _ha_request *reqp,
 	int rc = 0;
 	char *data = NULL;
 
-	rc = pthread_mutex_trylock(&ha_rest_mutex);
-	if (rc != 0) {
-		set_err_msg(resp, TGT_ERR_HA_BUSY,
-			"Another request being served. Try again later.");
-		return HA_CALLBACK_CONTINUE;
-	}
+	pthread_mutex_lock(&ha_rest_mutex);
 
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
@@ -875,14 +865,8 @@ static int new_stord(const _ha_request *reqp,
 
 	char *hyc_argv[1]   = {"tgtd"};
 	uint16_t stord_port = 0;
-	int rc;
 
-	rc = pthread_mutex_trylock(&ha_rest_mutex);
-	if (rc != 0) {
-		set_err_msg(resp, TGT_ERR_HA_BUSY,
-			"Another request being served. Try again later.");
-		return HA_CALLBACK_CONTINUE;
-	}
+	pthread_mutex_lock(&ha_rest_mutex);
 
 	data = ha_get_data(reqp);
 	if (data == NULL) {
@@ -955,12 +939,7 @@ static int target_delete(const _ha_request *reqp,
 	int force = 0;
 	int retry;
 
-	rc = pthread_mutex_trylock(&ha_rest_mutex);
-	if (rc != 0) {
-		set_err_msg(resp, TGT_ERR_HA_BUSY,
-			"Another request being served. Try again later.");
-		return HA_CALLBACK_CONTINUE;
-	}
+	pthread_mutex_lock(&ha_rest_mutex);
 
 	retry = RETRY;
 
@@ -1085,14 +1064,9 @@ static int lun_delete(const _ha_request *reqp,
 	int  rc, len;
 	const char *tid, *lid;
 
-	rc = pthread_mutex_trylock(&ha_rest_mutex);
-	if (rc != 0) {
-		set_err_msg(resp, TGT_ERR_HA_BUSY,
-			"Another request being served. Try again later.");
-		return HA_CALLBACK_CONTINUE;
-	}
-
 	rc = 0;
+
+	pthread_mutex_lock(&ha_rest_mutex);
 
 	tid  = ha_parameter_get(reqp, "tid");
 	if (tid == NULL) {
