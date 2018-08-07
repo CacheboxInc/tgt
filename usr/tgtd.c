@@ -48,6 +48,7 @@
 
 #define RETRY 24
 #define DELAY 5
+#define MAX_REST_CALLS 20
 
 unsigned long pagesize, pageshift;
 
@@ -62,6 +63,8 @@ static struct _ha_instance *ha;
 static bool ha_thread_init = false;
 static pthread_mutex_t ha_mutex;
 static pthread_mutex_t ha_rest_mutex;
+int active_rest_calls = 0;
+static pthread_mutex_t ha_active_call_cnt_mutex;
 
 static struct option const long_options[] = {
 	{"foreground", no_argument, 0, 'f'},
@@ -578,7 +581,7 @@ enum tgt_svc_err {
 	TGT_ERR_INVALID_LUNID,
 	TGT_ERR_LUN_DELETE,
 	TGT_ERR_STR_OUT_OF_RANGE,
-	TGT_ERR_HA_BUSY,
+	TGT_ERR_HA_MAX_LIMIT,
 };
 
 static void set_err_msg(_ha_response *resp, enum tgt_svc_err err,
@@ -606,6 +609,30 @@ static int exec(char *cmd)
 
 	return status;
 }
+
+static int disallow_rest_call()
+{
+	int rc = 0;
+	pthread_mutex_lock(&ha_active_call_cnt_mutex);
+	if (active_rest_calls > MAX_REST_CALLS) {
+		rc = 1;
+		eprintf("Rejecting request\n");
+		pthread_mutex_unlock(&ha_active_call_cnt_mutex);
+		return rc;
+	}
+
+	++active_rest_calls;
+	pthread_mutex_unlock(&ha_active_call_cnt_mutex);
+	return rc;
+}
+
+static void remove_rest_call()
+{
+	pthread_mutex_lock(&ha_active_call_cnt_mutex);
+	--active_rest_calls;
+	pthread_mutex_unlock(&ha_active_call_cnt_mutex);
+}
+
 
 static int target_create(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
@@ -656,12 +683,19 @@ static int target_create(const _ha_request *reqp,
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
 	pthread_mutex_lock(&ha_rest_mutex);
 	rc = exec(cmd);
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_TARGET_CREATE,
 			"target create failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -672,6 +706,7 @@ static int target_create(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
 			"tgt cmd too long");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -680,12 +715,14 @@ static int target_create(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_TARGET_BIND,
 			"target bind failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
 	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
 	return HA_CALLBACK_CONTINUE;
 }
 
@@ -768,12 +805,21 @@ static int lun_create(const _ha_request *reqp,
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	if (disallow_rest_call()) {
+		eprintf("Request rejected for %s\n", lid);
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
 	pthread_mutex_lock(&ha_rest_mutex);
+
 	rc = exec(cmd);
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_SPARSE_FILE_DIR_CREATE,
 			"sparse files dir create failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -790,6 +836,7 @@ static int lun_create(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
 			"spare file create cmd too long");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 	rc = exec(cmd);
@@ -797,6 +844,7 @@ static int lun_create(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_SPARSE_FILE_CREATE,
 			"sparse file create failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -814,6 +862,7 @@ static int lun_create(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
 			"dev_path too long");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 	len = 0;
@@ -826,6 +875,7 @@ static int lun_create(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
 			"tgt cmd too long");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 
@@ -835,11 +885,13 @@ static int lun_create(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_LUN_CREATE,
 			"target create failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
 	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
 	return HA_CALLBACK_CONTINUE;
 }
 
@@ -898,12 +950,20 @@ static int new_stord(const _ha_request *reqp,
 	}
 
 	//TODO: Add error handling for Stord init
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
 	pthread_mutex_lock(&ha_rest_mutex);
 	HycStorInitialize(1, hyc_argv, (char *)json_string_value(sip),
 			stord_port);
 
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
+
 	return HA_CALLBACK_CONTINUE;
 }
 
@@ -945,6 +1005,12 @@ static int target_delete(const _ha_request *reqp,
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
 	pthread_mutex_lock(&ha_rest_mutex);
 
 	//Ignoring error for now
@@ -965,6 +1031,7 @@ static int target_delete(const _ha_request *reqp,
 			set_err_msg(resp, TGT_ERR_TOO_LONG,
 				"tgt cmd too long");
 			pthread_mutex_unlock(&ha_rest_mutex);
+			remove_rest_call();
 			return HA_CALLBACK_CONTINUE;
 		}
 
@@ -983,6 +1050,7 @@ static int target_delete(const _ha_request *reqp,
 			set_err_msg(resp, TGT_ERR_TOO_LONG,
 				"tgt cmd too long");
 			pthread_mutex_unlock(&ha_rest_mutex);
+			remove_rest_call();
 			return HA_CALLBACK_CONTINUE;
 		}
 
@@ -1006,6 +1074,7 @@ static int target_delete(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
 			"tgt cmd too long");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 	while (retry > 0) {
@@ -1025,12 +1094,14 @@ static int target_delete(const _ha_request *reqp,
 		set_err_msg(resp, TGT_ERR_TARGET_DELETE,
 			"target delete failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
 	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
 	return HA_CALLBACK_CONTINUE;
 }
 
@@ -1068,18 +1139,26 @@ static int lun_delete(const _ha_request *reqp,
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
 	pthread_mutex_lock(&ha_rest_mutex);
 	rc = exec(cmd);
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_LUN_DELETE,
 			"TGT lun delete failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
 	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
 	return HA_CALLBACK_CONTINUE;
 }
 
@@ -1154,6 +1233,9 @@ int main(int argc, char **argv)
 		exit(1);
 
 	if (pthread_mutex_init(&ha_rest_mutex, NULL) != 0)
+		exit(1);
+
+	if (pthread_mutex_init(&ha_active_call_cnt_mutex, NULL) != 0)
 		exit(1);
 
 	ep_handlers->ha_count = 0;
