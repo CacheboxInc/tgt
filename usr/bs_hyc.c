@@ -24,6 +24,7 @@
 
 #include "TgtTypes.h"
 #include "TgtInterface.h"
+#include "cksum.h"
 
 static inline struct bs_hyc_info *BS_HYC_I(struct scsi_lu *lu)
 {
@@ -129,19 +130,35 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 	 * it later for the barrier IOs
 	 */
 
+	bufp = scsi_cmd_buffer(cmdp);
 	if(op == WRITE) {
+
+		if (length <= 4096) {
+			eprintf("Write:Offset:%"PRIu64" length:%lu cksum:%"PRIu16"\n", offset, length, crc_t10dif((unsigned char *)bufp, length));
+		} else {
+			eprintf("Write:Offset:%"PRIu64" length:%lu\n", offset, length);
+		}
+
 		if (!length) {
 			eprintf("Zero size write IO, returning from top :%lu\n", length);
+			assert(0);
 			return 0;
 		}
 	} else if(op == READ) {
+
+		if (length <= 4096) {
+			eprintf("Read:Offset:%"PRIu64" length:%lu cksum:%"PRIu16"\n", offset, length, crc_t10dif((unsigned char *)bufp, length));
+		} else {
+			eprintf("Read:Offset:%"PRIu64" length:%lu\n", offset, length);
+		}
+
 		if (!length) {
 			eprintf("Zero size read IO, returning from top :%lu\n", length);
+			assert(0);
 			return 0;
 		}
 	}
 
-	bufp = scsi_cmd_buffer(cmdp);
 	set_cmd_async(cmdp);
 
 	switch (op) {
@@ -159,8 +176,8 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 
 	/* If we got reqid, set it in hyc_cmd */
 	if (hyc_unlikely(reqid == kInvalidRequestID)) {
-		eprintf("request submission got error invalid request" 
-			" size: %lu offset : %"PRIu64" opcode :%u\n", 
+		eprintf("request submission got error invalid request"
+			" size: %lu offset : %"PRIu64" opcode :%u\n",
 			length, offset, (unsigned int) cmdp->scb[0]);
 		/*
 		 *  TODO: This change requires further investigation we have seen core dumps
