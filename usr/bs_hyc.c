@@ -132,26 +132,21 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 
 	bufp = scsi_cmd_buffer(cmdp);
 	if(op == WRITE) {
-
-		if (length <= 4096) {
-			eprintf("Write:Offset:%"PRIu64" length:%lu cksum:%"PRIu16"\n", offset, length, crc_t10dif((unsigned char *)bufp, length));
-		} else {
-			eprintf("Write:Offset:%"PRIu64" length:%lu\n", offset, length);
-		}
-
 		if (!length) {
 			eprintf("Zero size write IO, returning from top :%lu\n", length);
-			assert(0);
 			return 0;
 		}
-	} else if(op == READ) {
 
-		if (length <= 4096) {
-			eprintf("Read:Offset:%"PRIu64" length:%lu cksum:%"PRIu16"\n", offset, length, crc_t10dif((unsigned char *)bufp, length));
-		} else {
-			eprintf("Read:Offset:%"PRIu64" length:%lu\n", offset, length);
+		if (infop->journal_fd >= 0) {
+			if (pwrite(infop->journal_fd, bufp, length, offset) != length) {
+				eprintf("Unable to write in journal at Offset:%"PRIu64" length:%lu\n", offset, length);
+				assert(0);
+			} else {
+				eprintf("Written in journal at Offset:%"PRIu64" length:%lu\n", offset, length);
+			}
 		}
-
+		eprintf("Write:Offset:%"PRIu64" length:%lu cksum:%"PRIu16"\n", offset, length, crc_t10dif((unsigned char *)bufp, length));
+	} else if(op == READ) {
 		if (!length) {
 			eprintf("Zero size read IO, returning from top :%lu\n", length);
 			assert(0);
@@ -316,7 +311,8 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	tgtadm_err          e = TGTADM_SUCCESS;
 	char               *p;
 	char               *vmdkid = NULL;
-	char               *vmid = NULL;
+	char               *vmid = NULL, *journal_file = "/dev/sdi";
+	int journal_fd = -1;
 
 	assert(lup->tgt);
 
@@ -361,6 +357,13 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 		infop->rpc_con = HycStorRpcServerConnect();
 		assert(infop->rpc_con != kInvalidRpcHandle);
 	}
+
+	/* Try to open journal file in write mode*/
+	journal_fd = open(journal_file, O_WRONLY);
+	if (journal_fd < 0) {
+		journal_fd = -1;
+	}
+	infop->journal_fd = journal_fd;
 	return e;
 }
 
@@ -369,6 +372,9 @@ static void bs_hyc_exit(struct scsi_lu *lup)
 	struct bs_hyc_info *infop = BS_HYC_I(lup);
 
 	assert(infop);
+	if (infop->journal_fd >= 0) {
+		close(infop->journal_fd);
+	}
 
 	HycStorRpcServerDisconnect(infop->rpc_con);
 	free(infop->request_resultsp);

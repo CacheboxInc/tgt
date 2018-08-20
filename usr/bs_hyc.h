@@ -21,6 +21,7 @@ struct bs_hyc_info {
 	int                    done_eventfd;
 	struct RequestResult  *request_resultsp;
 	uint32_t               nr_results;
+	int                    journal_fd;
 };
 
 #endif
