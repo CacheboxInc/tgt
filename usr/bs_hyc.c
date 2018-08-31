@@ -19,6 +19,7 @@
 #include "target.h"
 #include "util.h"
 #include "parser.h"
+#include "iscsi/iscsid.h"
 
 #include "bs_hyc.h"
 
@@ -99,83 +100,6 @@ static char *scsi_cmd_buffer(struct scsi_cmd *cmdp)
 	}
 }
 
-static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
-{
-	struct scsi_lu     *lup = NULL;
-	struct bs_hyc_info *infop = NULL;
-	io_type_t           op;
-	size_t              length;
-	uint64_t            offset;
-	char               *bufp = NULL;
-	RequestID           reqid = kInvalidRequestID;
-
-	lup = cmdp->dev;
-	infop = BS_HYC_I(lup);
-
-	assert(infop->vmdk_handle != kInvalidVmdkHandle);
-
-	op = scsi_cmd_operation(cmdp);
-	if (hyc_unlikely(op == WRITE_SAME_OP)) {
-		return -1;
-	} else if (hyc_unlikely(op == UNKNOWN)) {
-		return 0;
-	}
-
-	offset = scsi_cmd_offset(cmdp);
-	length = scsi_cmd_length(cmdp);
-
-	/*
-	 * Simply returing from top for zero size IOs, we may need to handle
-	 * it later for the barrier IOs
-	 */
-
-	if(op == WRITE) {
-		if (!length) {
-			eprintf("Zero size write IO, returning from top :%lu\n", length);
-			return 0;
-		}
-	} else if(op == READ) {
-		if (!length) {
-			eprintf("Zero size read IO, returning from top :%lu\n", length);
-			return 0;
-		}
-	}
-
-	bufp = scsi_cmd_buffer(cmdp);
-	set_cmd_async(cmdp);
-
-	switch (op) {
-	case READ:
-		reqid = HycScheduleRead(infop->vmdk_handle, cmdp, bufp, length, offset);
-		break;
-	case WRITE:
-		reqid = HycScheduleWrite(infop->vmdk_handle, cmdp, bufp, length, offset);
-		break;
-	case WRITE_SAME_OP:
-	case UNKNOWN:
-	default:
-		assert(0);
-	}
-
-	/* If we got reqid, set it in hyc_cmd */
-	if (hyc_unlikely(reqid == kInvalidRequestID)) {
-		eprintf("request submission got error invalid request" 
-			" size: %lu offset : %"PRIu64" opcode :%u\n", 
-			length, offset, (unsigned int) cmdp->scb[0]);
-		/*
-		 *  TODO: This change requires further investigation we have seen core dumps
-		 *  with this change. Keeping it as todo, investigation will be done later.
-		 *  Reverting to the original path.
-		 */
-
-		//clear_cmd_async(cmdp);
-		target_cmd_io_done(cmdp, SAM_STAT_CHECK_CONDITION);
-		return -EINVAL;
-	}
-
-	return 0;
-}
-
 static void bs_hyc_handle_completion(int fd, int events, void *datap)
 {
 	struct bs_hyc_info *infop;
@@ -210,6 +134,116 @@ static void bs_hyc_handle_completion(int fd, int events, void *datap)
 			has_more = c != 0;
 		}
 	}
+}
+
+static void post_scsi_completion(struct iscsi_connection* connp)
+{
+	if (hyc_likely(connp->state == STATE_SCSI)) {
+		do {
+			int ret = iscsi_tx_handler(connp);
+			if (hyc_unlikely(ret)) {
+				break;
+			}
+		} while (connp->state == STATE_SCSI && !list_empty(&connp->tx_clist));
+	}
+}
+
+static inline void fetch_complete_commands(struct iscsi_connection* connp,
+		struct bs_hyc_info* infop)
+{
+	if (hyc_unlikely(connp == NULL)) {
+		return;
+	}
+	bs_hyc_handle_completion(infop->done_eventfd, 0, infop);
+	post_scsi_completion(connp);
+}
+
+static inline struct iscsi_connection*
+scsi_cmd_to_iscsi_connection(struct scsi_cmd* cmdp)
+{
+	struct iscsi_task* taskp = container_of(cmdp, struct iscsi_task, scmd);
+	if (hyc_unlikely(taskp->conn->state == STATE_CLOSE)) {
+		return NULL;
+	}
+
+	return taskp->conn;
+}
+
+static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
+{
+	struct scsi_lu     *lup = NULL;
+	struct bs_hyc_info *infop = NULL;
+	io_type_t           op;
+	size_t              length;
+	uint64_t            offset;
+	char               *bufp = NULL;
+	RequestID           reqid = kInvalidRequestID;
+	bool                fetch_complete = false;
+
+	lup = cmdp->dev;
+	infop = BS_HYC_I(lup);
+
+	assert(infop->vmdk_handle != kInvalidVmdkHandle);
+
+	op = scsi_cmd_operation(cmdp);
+	if (hyc_unlikely(op == WRITE_SAME_OP)) {
+		return -1;
+	} else if (hyc_unlikely(op == UNKNOWN)) {
+		return 0;
+	}
+
+	offset = scsi_cmd_offset(cmdp);
+	length = scsi_cmd_length(cmdp);
+
+	/*
+	 * Simply returing from top for zero size IOs, we may need to handle
+	 * it later for the barrier IOs
+	 */
+
+	if (hyc_unlikely(length == 0)) {
+		eprintf("Zero size IO, returning from top :%lu\n", length);
+		return 0;
+	}
+
+	bufp = scsi_cmd_buffer(cmdp);
+	set_cmd_async(cmdp);
+
+	switch (op) {
+	case READ:
+		reqid = HycScheduleRead(infop->vmdk_handle, cmdp, bufp, length, offset, &fetch_complete);
+		break;
+	case WRITE:
+		reqid = HycScheduleWrite(infop->vmdk_handle, cmdp, bufp, length, offset, &fetch_complete);
+		break;
+	case WRITE_SAME_OP:
+	case UNKNOWN:
+	default:
+		assert(0);
+	}
+
+	/* If we got reqid, set it in hyc_cmd */
+	if (hyc_unlikely(reqid == kInvalidRequestID)) {
+		eprintf("request submission got error invalid request" 
+			" size: %lu offset : %"PRIu64" opcode :%u\n", 
+			length, offset, (unsigned int) cmdp->scb[0]);
+		/*
+		 *  TODO: This change requires further investigation we have seen core dumps
+		 *  with this change. Keeping it as todo, investigation will be done later.
+		 *  Reverting to the original path.
+		 */
+
+		//clear_cmd_async(cmdp);
+		target_cmd_io_done(cmdp, SAM_STAT_CHECK_CONDITION);
+		return -EINVAL;
+	}
+
+	if (fetch_complete) {
+		struct iscsi_connection* connp;
+		connp = scsi_cmd_to_iscsi_connection(cmdp);
+		fetch_complete_commands(connp, infop);
+	}
+
+	return 0;
 }
 
 static int bs_hyc_open(struct scsi_lu *lup, char *pathp,
