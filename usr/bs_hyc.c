@@ -100,6 +100,69 @@ static char *scsi_cmd_buffer(struct scsi_cmd *cmdp)
 	}
 }
 
+#ifdef TRACK_HYC_CMDS
+int display_cmd_list (struct scsi_lu *lup) {
+	struct scsi_cmd *cmd, *next;
+	uint32_t count = 0;
+	struct list_head *list;
+	struct bs_hyc_info *infop = NULL;
+
+	infop = BS_HYC_I(lup);
+
+	pthread_mutex_lock(&infop->lock);
+	eprintf(" Displaying pending cmds:-\n");
+	list_for_each_entry_safe(cmd, next, &infop->cmd_list, hyc_cmd_list) {
+		eprintf("Pending cmd address : %p offset :: %"PRIu64" length : %u ops : %u\n", &cmd, cmd->offset,
+			scsi_cmd_length(cmd), (unsigned int) cmd->scb[0]);
+		count++;
+	}
+	pthread_mutex_unlock(&infop->lock);
+
+	#if 0
+	if (0) {
+		list_for_each(list, &infop->cmd_list) {
+		cmd = list_entry(list, struct scsi_cmd, hyc_cmd_list);
+		eprintf("Pending cmd address : %p offset :: %"PRIu64" length : %u ops : %u\n", &cmd, cmd->offset,
+			scsi_cmd_length(cmd), (unsigned int) cmd->scb[0]);
+		}
+	}
+	#endif
+	return count;
+}
+
+static void add_cmd_in_list(struct scsi_cmd *cmdp, struct bs_hyc_info *infop) {
+
+	pthread_mutex_lock(&infop->lock);
+	INIT_LIST_HEAD(&cmdp->hyc_cmd_list);
+	list_add_tail(&cmdp->hyc_cmd_list, &infop->cmd_list);
+	if (0) {
+		pthread_mutex_unlock(&infop->lock);
+		display_cmd_list (cmdp->dev);
+	} else {
+		pthread_mutex_unlock(&infop->lock);
+	}
+}
+
+static void remove_cmd_from_list(struct scsi_cmd *cmdp, struct bs_hyc_info *infop) {
+
+	struct scsi_cmd *cmd, *next;
+	bool found = false;
+
+	pthread_mutex_lock(&infop->lock);
+	list_for_each_entry_safe(cmd, next, &infop->cmd_list, hyc_cmd_list) {
+		if (cmd == cmdp) {
+			list_del(&cmd->hyc_cmd_list);
+			found = true;
+			break;
+		}
+	}
+	pthread_mutex_unlock(&infop->lock);
+	if (found == false) {
+		assert(0);
+	}
+}
+#endif
+
 static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 {
 	struct scsi_lu     *lup = NULL;
@@ -117,7 +180,7 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 
 	op = scsi_cmd_operation(cmdp);
 	if (hyc_unlikely(op == WRITE_SAME_OP)) {
-		return -1;
+		return -EINVAL;
 	} else if (hyc_unlikely(op == UNKNOWN)) {
 		return 0;
 	}
@@ -142,6 +205,11 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 		}
 	}
 
+#ifdef TRACK_HYC_CMDS
+	/* Add into cmd list */
+	add_cmd_in_list(cmdp, infop);
+#endif
+
 	bufp = scsi_cmd_buffer(cmdp);
 	set_cmd_async(cmdp);
 
@@ -163,14 +231,11 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 		eprintf("request submission got error invalid request" 
 			" size: %lu offset : %"PRIu64" opcode :%u\n", 
 			length, offset, (unsigned int) cmdp->scb[0]);
-		/*
-		 *  TODO: This change requires further investigation we have seen core dumps
-		 *  with this change. Keeping it as todo, investigation will be done later.
-		 *  Reverting to the original path.
-		 */
+		clear_cmd_async(cmdp);
 
-		//clear_cmd_async(cmdp);
-		target_cmd_io_done(cmdp, SAM_STAT_CHECK_CONDITION);
+#ifdef TRACK_HYC_CMDS
+		remove_cmd_from_list(cmdp, infop);
+#endif
 		return -EINVAL;
 	}
 
@@ -233,6 +298,9 @@ static void bs_hyc_handle_completion(int fd, int events, void *datap)
 			assert(connp == cp);
 
 			assert(resultsp[i].result == 0);
+#ifdef TRACK_HYC_CMDS
+			remove_cmd_from_list(cmdp, infop);
+#endif
 			target_cmd_io_done(cmdp, SAM_STAT_GOOD);
 		}
 		memset(resultsp, 0, sizeof(*resultsp) * nr_results);
@@ -338,7 +406,9 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	char               *p;
 	char               *vmdkid = NULL;
 	char               *vmid = NULL;
-
+#ifdef TRACK_HYC_CMDS
+	int rc;
+#endif
 	assert(lup->tgt);
 
 	eprintf("bsopts:%s\n", bsoptsp);
@@ -371,6 +441,15 @@ static tgtadm_err bs_hyc_init(struct scsi_lu *lup, char *bsoptsp)
 	infop->vmid = vmid;
 	infop->vmdkid = vmdkid;
 	infop->nr_results = 32;
+
+#ifdef TRACK_HYC_CMDS
+	INIT_LIST_HEAD(&infop->cmd_list);
+	rc = pthread_mutex_init(&infop->lock, NULL);
+	if (rc != 0) {
+		eprintf("%s: mutex lock init failed.\n", __func__);
+		return TGTADM_UNKNOWN_ERR;
+	}
+#endif
 	infop->request_resultsp = calloc(infop->nr_results,
 		sizeof(*infop->request_resultsp));
 	if (!infop->request_resultsp) {

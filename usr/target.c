@@ -41,10 +41,15 @@
 #include "tgtadm.h"
 #include "parser.h"
 #include "spc.h"
+#include <pthread.h>
+#include "bs_hyc.h"
 
 static LIST_HEAD(device_type_list);
 
 static struct target global_target;
+#ifdef TRACK_HYC_CMDS
+extern uint32_t display_cmd_list (struct scsi_lu* );
+#endif
 
 int device_type_register(struct device_type_template *t)
 {
@@ -735,8 +740,13 @@ tgtadm_err tgt_device_destroy(int tid, uint64_t lun, int force)
 		return TGTADM_NO_LUN;
 	}
 
-	if (!list_empty(&lu->cmd_queue.queue) || lu->cmd_queue.active_cmd)
+	if (!list_empty(&lu->cmd_queue.queue) || lu->cmd_queue.active_cmd) {
+		eprintf("Active cmd count : %u\n", lu->cmd_queue.active_cmd);
+#ifdef TRACK_HYC_CMDS
+		display_cmd_list (lu);
+#endif
 		return TGTADM_LUN_ACTIVE;
+	}
 
 	if (lu->dev_type_template.lu_exit)
 		lu->dev_type_template.lu_exit(lu);
@@ -1084,6 +1094,7 @@ static int cmd_enabled(struct tgt_cmd_queue *q, struct scsi_cmd *cmd)
 
 static void cmd_post_perform(struct tgt_cmd_queue *q, struct scsi_cmd *cmd)
 {
+	dprintf("cmd_post_perform , offset is : %"PRIu64"\n", cmd->offset);
 	q->active_cmd++;
 	switch (cmd->attribute) {
 	case MSG_ORDERED_TAG:
@@ -1281,6 +1292,7 @@ static void __cmd_done(struct target *target, struct scsi_cmd *cmd)
 		scsi_get_in_buffer(cmd), scsi_get_out_length(cmd),
 		scsi_get_in_length(cmd));
 
+	dprintf("__cmd_done, offset is : %"PRIu64"\n", cmd->offset);
 	q = &cmd->dev->cmd_queue;
 	q->active_cmd--;
 	switch (cmd->attribute) {
@@ -1322,8 +1334,7 @@ static int abort_cmd(struct target *target, struct mgmt_req *mreq,
 {
 	int err = 0;
 
-	eprintf("found %" PRIx64 " %lx\n", cmd->tag, cmd->state);
-
+	dprintf("abort_cmd found %" PRIx64 " %lx offset is : %"PRIu64"\n", cmd->tag, cmd->state, cmd->offset);
 	if (cmd_processed(cmd)) {
 		/*
 		 * We've already sent this command to kernel space.
@@ -1331,9 +1342,11 @@ static int abort_cmd(struct target *target, struct mgmt_req *mreq,
 		 * completion of this command.
 		 */
 
+		dprintf("abort_cmd cmd_processed is set, offset is : %"PRIu64"\n", cmd->offset);
 		cmd->mreq = mreq;
 		err = -EBUSY;
 	} else {
+		dprintf("abort_cmd cmd_processed is not, set offset is : %"PRIu64"\n", cmd->offset);
 		cmd->dev->cmd_done(target, cmd);
 		target_cmd_io_done(cmd, TASK_ABORTED);
 	}
@@ -1346,8 +1359,6 @@ static int abort_task_set(struct mgmt_req *mreq, struct target *target,
 	struct scsi_cmd *cmd, *tmp;
 	struct it_nexus *itn;
 	int err, count = 0;
-
-	eprintf("found %" PRIx64 " %d\n", tag, all);
 
 	list_for_each_entry(itn, &target->it_nexus_list, nexus_siblings) {
 		list_for_each_entry_safe(cmd, tmp, &itn->cmd_list, c_hlist) {
@@ -1434,6 +1445,7 @@ enum mgmt_req_result target_mgmt_request(int tid, uint64_t itn_id,
 		}
 		break;
 	case LOGICAL_UNIT_RESET:
+		eprintf("%s: LOGICAL_UNIT_RESET called\n", __func__);
 		lun = scsi_get_devid(target->lid, lun_buf);
 		device_release(target->tid, itn_id, lun, 1);
 		count = abort_task_set(mreq, target, itn_id, 0, lun_buf, 0);
