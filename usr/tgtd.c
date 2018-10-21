@@ -579,7 +579,9 @@ enum tgt_svc_err {
 	TGT_ERR_TARGET_BIND,
 	TGT_ERR_SPARSE_FILE_DIR_CREATE,
 	TGT_ERR_INVALID_LUN_SIZE,
+	TGT_ERR_SPARSE_FILE_OPEN,
 	TGT_ERR_SPARSE_FILE_CREATE,
+	TGT_ERR_SPARSE_FILE_CLOSE,
 	TGT_ERR_INVALID_STORD_IP,
 	TGT_ERR_INVALID_STORD_PORT,
 	TGT_ERR_INVALID_DELETE_FORCE,
@@ -740,6 +742,7 @@ static int lun_create(const _ha_request *reqp,
 	const char *lid = ha_parameter_get(reqp, "lid");
 	int rc = 0;
 	char *data = NULL;
+	int file, f_mode;
 
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
@@ -834,21 +837,29 @@ static int lun_create(const _ha_request *reqp,
 	len = 0;
 
 	/* Create sparse file for this LUN */
-	len = snprintf(cmd, sizeof(cmd),
-		"dd if=/dev/zero of=%s/%s bs=1 count=0 seek=%sG",
-		hyc_sparse_files_loc, json_string_value(dev_name),
-		json_string_value(lun_size));
-	if (len >= sizeof(cmd)) {
-		set_err_msg(resp, TGT_ERR_TOO_LONG,
-			"spare file create cmd too long");
+	f_mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
+	len = snprintf(cmd, sizeof(cmd), "%s/%s",
+			hyc_sparse_files_loc, json_string_value(dev_name));
+	file = open(cmd, O_WRONLY | O_CREAT, f_mode);
+	if (file == -1) {
+		set_err_msg(resp, TGT_ERR_SPARSE_FILE_OPEN,
+			"sparse file create failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
 		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
-	rc = exec(cmd);
+	rc = ftruncate(file, atol(json_string_value(lun_size)));
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_SPARSE_FILE_CREATE,
-			"sparse file create failed");
+			"sparse file truncate failed ");
+		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
+		return HA_CALLBACK_CONTINUE;
+	}
+	rc = close(file);
+	if (rc) {
+		set_err_msg(resp, TGT_ERR_SPARSE_FILE_CLOSE,
+			"sparse file close failed ");
 		pthread_mutex_unlock(&ha_rest_mutex);
 		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
