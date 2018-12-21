@@ -170,6 +170,7 @@ struct backingstore_template {
 	tgtadm_err (*bs_init)(struct scsi_lu *dev, char *bsopts);
 	void (*bs_exit)(struct scsi_lu *dev);
 	int (*bs_cmd_submit)(struct scsi_cmd *cmd);
+	void (*bs_hyc_cleanup) (struct scsi_lu* devp);
 	int bs_oflags_supported;
 	unsigned long bs_supported_ops[NR_SCSI_OPCODES / __WORDSIZE];
 

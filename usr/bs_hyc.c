@@ -356,6 +356,33 @@ static void bs_hyc_exit(struct scsi_lu *lup)
 	free(infop->vmdkid);
 }
 
+static void bs_hyc_cleanup(struct scsi_lu* lup) {
+	struct bs_hyc_info *infop = BS_HYC_I(lup);
+	assert(lup && infop);
+	size_t nr_failed = HycFailAllRequests(infop->vmdk_handle);
+	if (nr_failed == 0) {
+		return;
+	}
+
+	struct RequestResult *resultsp = infop->request_resultsp;
+	bool has_more = true;
+	while (has_more == true) {
+		uint32_t nr_requests = HycGetFailedRequests(infop->vmdk_handle,
+			resultsp, infop->nr_results, &has_more);
+		if (nr_requests == 0) {
+			break;
+		}
+
+		for (uint32_t i = 0; i < nr_requests; ++i) {
+			struct scsi_cmd *cmdp = (struct scsi_cmd *) resultsp[i].privatep;
+			assert(cmdp);
+
+			assert(resultsp[i].result == 0);
+			target_cmd_io_done(cmdp, SAM_STAT_COMMAND_TERMINATED);
+		}
+	}
+}
+
 static struct backingstore_template hyc_bst = {
 	.bs_name		= "hyc",
 	.bs_datasize		= sizeof(struct bs_hyc_info),
@@ -364,6 +391,7 @@ static struct backingstore_template hyc_bst = {
 	.bs_open		= bs_hyc_open,
 	.bs_close		= bs_hyc_close,
 	.bs_cmd_submit		= bs_hyc_cmd_submit,
+	.bs_hyc_cleanup = bs_hyc_cleanup,
 };
 
 __attribute__((constructor)) static void bs_hyc_constructor(void)

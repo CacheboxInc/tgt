@@ -735,8 +735,12 @@ tgtadm_err tgt_device_destroy(int tid, uint64_t lun, int force)
 		return TGTADM_NO_LUN;
 	}
 
-	if (!list_empty(&lu->cmd_queue.queue) || lu->cmd_queue.active_cmd)
+	if (!list_empty(&lu->cmd_queue.queue) || lu->cmd_queue.active_cmd) {
+		eprintf("Queue empty %d, Active Commands = %d\n",
+			list_empty(&lu->cmd_queue.queue), lu->cmd_queue.active_cmd);
+		lu->bst->bs_hyc_cleanup(lu);
 		return TGTADM_LUN_ACTIVE;
+	}
 
 	if (lu->dev_type_template.lu_exit)
 		lu->dev_type_template.lu_exit(lu);
