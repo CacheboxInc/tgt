@@ -1085,6 +1085,29 @@ static int target_delete(const _ha_request *reqp, _ha_response *resp, void *user
 	return HA_CALLBACK_CONTINUE;
 }
 
+static int set_wan_latency(const _ha_request *reqp,
+		_ha_response *resp, void *userp) {
+	unsigned long long latency;
+	const char* latencyp;
+	int rc;
+
+	latencyp = ha_parameter_get(reqp, "wan_latency");
+	if (latencyp == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"expected wan latency in microseconds");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	rc = str_to_int(latencyp, latency);
+	if (rc) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"expected wan latency in microseconds");
+		return HA_CALLBACK_CONTINUE;
+	}
+	HycSetExpectedWanLatency(latency);
+	return HA_CALLBACK_CONTINUE;
+}
+
 static int lun_delete(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
@@ -1198,7 +1221,7 @@ int main(int argc, char **argv)
 	int is_daemon = 1, is_debug = 0;
 	int ret;
 	struct ha_handlers *ep_handlers = malloc(sizeof(struct ha_handlers) +
-		5 * sizeof(struct ha_endpoint_handlers));
+		6 * sizeof(struct ha_endpoint_handlers));
 	char *etcd_ip = NULL;
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
@@ -1266,6 +1289,13 @@ int main(int argc, char **argv)
 	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "lun_delete",
 		strlen("lun_delete") + 1);
 	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = lun_delete;
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
+
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
+	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "set_wan_latency",
+		strlen("set_wan_latency") + 1);
+	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = set_wan_latency;
 	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
 	ep_handlers->ha_count += 1;
 
