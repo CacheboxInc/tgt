@@ -1341,7 +1341,7 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-	ha = ha_initialize(ha_svc_port, etcd_ip, svc_label, tgt_version, 120,
+	ha = ha_initialize(ha_svc_port, etcd_ip, svc_label, tgt_version, 300,
 			ep_handlers, tgt_ha_start_cb, tgt_ha_stop_cb, 0 , NULL);
 
 	if (ha == NULL) {
