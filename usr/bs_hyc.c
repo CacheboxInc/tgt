@@ -79,6 +79,9 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 		break;
 	case SYNCHRONIZE_CACHE:
 	case SYNCHRONIZE_CACHE_16:
+		/* SYNCHRONIZE_CACHE (35h), SYNCHRONIZE_CACHE_16 (91h) */
+		op = SYNCHRONIZE_CACHE_OP;
+        break;
 	default:
 		eprintf("skipped cmd: %p op: %x\n", cmdp, scsi_op);
 		op = UNKNOWN;
@@ -101,6 +104,7 @@ static uint32_t scsi_cmd_length(struct scsi_cmd *cmdp)
 		return scsi_get_out_transfer_len(cmdp);
 	case ABORT_TASK_OP:
 	case ABORT_TASK_SET_OP:
+	case SYNCHRONIZE_CACHE_OP:
 		return 0;
 	default:
 		assert(0);
@@ -144,6 +148,51 @@ static int bs_hyc_unmap(struct bs_hyc_info* infop, struct scsi_lu* lup,
 	return HycScheduleTruncate(infop->vmdk_handle, cmdp, bufp, length);
 }
 
+static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
+		struct scsi_cmd* cmdp)
+{
+	uint64_t offset = 0; // lba
+	uint32_t num_blks = 0;  //num_lbas
+	int      result = SAM_STAT_GOOD;
+	uint8_t  key;
+	uint16_t asc;
+	size_t   blocksize;
+
+	/* IMMED bit is set but it's not supported by device server */
+	if (cmd->scb[1] & 0x2) {
+		asc = ASC_INVALID_FIELD_IN_CDB;
+		goto sense;
+	}
+
+	offset = scsi_rw_offset(cmdp);
+	num_blks = scsi_rw_count(cmdp);
+	blocksize = 1 << lup->blk_shift;
+
+	/* num_blks set to 0 means all LBAs until end of device */
+	if (num_blks == 0) {
+        num_blks = (lup->size >> blocksize) - offset;
+	}
+
+	/* Verify that we are not doing i/o beyond the end-of-lun */
+	if ((offset >= lu->size >> blocksize) ||
+		(offset + num_blks > lu->size >> blocksize)) {
+		asc = ASC_LBA_OUT_OF_RANGE;
+		goto sense;
+	}
+
+	set_cmd_async(cmdp);
+	return HycScheduleSyncCache(infop->vmdk_handle, cmdp, offset, num_blks);
+
+sense:
+	result = SAM_STAT_CHECK_CONDITION;
+	key = ILLEGAL_REQUEST;
+
+	scsi_set_result(cmd, result);
+	sense_data_build(cmdp, key, asc);
+
+	return result;
+}
+
 static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 {
 	struct scsi_lu     *lup = NULL;
@@ -166,6 +215,8 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 		break;
 	case TRUNCATE:
 		return bs_hyc_unmap(infop, lup, cmdp);
+	case SYNCHRONIZE_CACHE_OP:
+		return bs_hyc_sync(infop, lup, cmdp);
 	case WRITE_SAME_OP:
 		return -1;
 	case UNKNOWN:
