@@ -159,13 +159,13 @@ static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
 	size_t   blocksize;
 
 	/* IMMED bit is set but it's not supported by device server */
-	if (cmd->scb[1] & 0x2) {
+	if (cmdp->scb[1] & 0x2) {
 		asc = ASC_INVALID_FIELD_IN_CDB;
 		goto sense;
 	}
 
-	offset = scsi_rw_offset(cmdp);
-	num_blks = scsi_rw_count(cmdp);
+	offset = scsi_rw_offset(cmdp->scb);
+	num_blks = scsi_rw_count(cmdp->scb);
 	blocksize = 1 << lup->blk_shift;
 
 	/* num_blks set to 0 means all LBAs until end of device */
@@ -174,8 +174,8 @@ static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
 	}
 
 	/* Verify that we are not doing i/o beyond the end-of-lun */
-	if ((offset >= lu->size >> blocksize) ||
-		(offset + num_blks > lu->size >> blocksize)) {
+	if ((offset >= lup->size >> blocksize) ||
+		(offset + num_blks > lup->size >> blocksize)) {
 		asc = ASC_LBA_OUT_OF_RANGE;
 		goto sense;
 	}
@@ -187,7 +187,7 @@ sense:
 	result = SAM_STAT_CHECK_CONDITION;
 	key = ILLEGAL_REQUEST;
 
-	scsi_set_result(cmd, result);
+	scsi_set_result(cmdp, result);
 	sense_data_build(cmdp, key, asc);
 
 	return result;
