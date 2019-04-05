@@ -91,7 +91,20 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 
 static uint64_t scsi_cmd_offset(struct scsi_cmd *cmdp)
 {
-	return cmdp->offset;
+	switch (scsi_cmd_operation(cmdp)) {
+	case READ:
+	case WRITE:
+	case WRITE_SAME_OP:
+		return cmdp->offset;
+	case SYNCHRONIZE_CACHE_OP:
+		return scsi_rw_offset(cmdp->scb);
+	case ABORT_TASK_OP:
+	case ABORT_TASK_SET_OP:
+		return 0;
+	default:
+		assert(0);
+	}
+	return 0;
 }
 
 static uint32_t scsi_cmd_length(struct scsi_cmd *cmdp)
@@ -102,9 +115,12 @@ static uint32_t scsi_cmd_length(struct scsi_cmd *cmdp)
 	case WRITE_SAME_OP:
 	case WRITE:
 		return scsi_get_out_transfer_len(cmdp);
+	case TRUNCATE:
+		return scsi_get_out_length(cmdp);
+	case SYNCHRONIZE_CACHE_OP:
+		return scsi_rw_count(cmdp->scb);
 	case ABORT_TASK_OP:
 	case ABORT_TASK_SET_OP:
-	case SYNCHRONIZE_CACHE_OP:
 		return 0;
 	default:
 		assert(0);
@@ -122,6 +138,7 @@ static char *scsi_cmd_buffer(struct scsi_cmd *cmdp)
 		return scsi_get_in_buffer(cmdp);
 	case WRITE:
 	case WRITE_SAME_OP:
+	case TRUNCATE:
 		return scsi_get_out_buffer(cmdp);
 	}
 }
@@ -136,8 +153,8 @@ static int bs_hyc_unmap(struct bs_hyc_info* infop, struct scsi_lu* lup,
 		return -1;
 	}
 
-	length = scsi_get_out_length(cmdp);
-	bufp = scsi_get_out_buffer(cmdp);
+	length = scsi_cmd_length(cmdp);
+	bufp = scsi_cmd_buffer(cmdp);
 	if (length < 0 || bufp == NULL) {
 		return 0;
 	}
@@ -164,8 +181,8 @@ static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
 		goto sense;
 	}
 
-	lba = scsi_rw_offset(cmdp->scb);
-	num_blks = scsi_rw_count(cmdp->scb);
+	lba = scsi_cmd_offset(cmdp);
+	num_blks = scsi_cmd_length(cmdp);
 
 	/* num_blks set to 0 means all LBAs until end of device */
 	if (num_blks == 0) {
