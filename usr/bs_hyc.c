@@ -164,7 +164,7 @@ static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
 		goto sense;
 	}
 
-	lba = scsi_rw_lba(cmdp->scb);
+	lba = scsi_rw_offset(cmdp->scb);
 	num_blks = scsi_rw_count(cmdp->scb);
 
 	/* num_blks set to 0 means all LBAs until end of device */
