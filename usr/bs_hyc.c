@@ -151,12 +151,12 @@ static int bs_hyc_unmap(struct bs_hyc_info* infop, struct scsi_lu* lup,
 static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
 		struct scsi_cmd* cmdp)
 {
-	uint64_t offset = 0; // lba
-	uint32_t num_blks = 0;  //num_lbas
+	uint64_t lba;      // start lba
+	uint32_t num_blks; // end lba
 	int      result = SAM_STAT_GOOD;
 	uint8_t  key;
 	uint16_t asc;
-	size_t   blocksize;
+	uint16_t blk_shift = lup->blk_shift;
 
 	/* IMMED bit is set but it's not supported by device server */
 	if (cmdp->scb[1] & 0x2) {
@@ -164,24 +164,25 @@ static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
 		goto sense;
 	}
 
-	offset = scsi_rw_offset(cmdp->scb);
+	lba = scsi_rw_lba(cmdp->scb);
 	num_blks = scsi_rw_count(cmdp->scb);
-	blocksize = 1 << lup->blk_shift;
 
 	/* num_blks set to 0 means all LBAs until end of device */
 	if (num_blks == 0) {
-        num_blks = (lup->size >> blocksize) - offset;
+		num_blks = (lup->size >> blk_shift) - lba;
 	}
 
 	/* Verify that we are not doing i/o beyond the end-of-lun */
-	if ((offset >= lup->size >> blocksize) ||
-		(offset + num_blks > lup->size >> blocksize)) {
+	if ((lba >= lup->size >> blk_shift) ||
+		((lba + num_blks) > lup->size >> blk_shift)) {
 		asc = ASC_LBA_OUT_OF_RANGE;
+		eprintf("SYNC error LBA out of range");
 		goto sense;
 	}
 
 	set_cmd_async(cmdp);
-	return HycScheduleSyncCache(infop->vmdk_handle, cmdp, offset, num_blks);
+	return HycScheduleSyncCache(infop->vmdk_handle, cmdp, lba << blk_shift,
+		num_blks << blk_shift);
 
 sense:
 	result = SAM_STAT_CHECK_CONDITION;
