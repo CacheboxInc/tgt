@@ -590,6 +590,7 @@ enum tgt_svc_err {
 	TGT_ERR_LUN_DELETE,
 	TGT_ERR_STR_OUT_OF_RANGE,
 	TGT_ERR_HA_MAX_LIMIT,
+	TGT_ERR_GET_COMPONENT_STATS_FAILED,
 };
 
 static void set_err_msg(_ha_response *resp, enum tgt_svc_err err,
@@ -1238,6 +1239,77 @@ out:
 	return HA_CALLBACK_CONTINUE;
 }
 
+json_t* GetElement(const char* key, int64_t val, const char* descr) {
+	json_t* obj = json_array();
+	json_array_append_new(obj, json_string(key));
+	json_array_append_new(obj, json_integer(val));
+	json_array_append_new(obj, json_string(descr)); 
+	return obj;
+}
+
+static int get_component_stats(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	int rc = 0;
+	component_stats_t g_stats = {0};
+
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	pthread_mutex_lock(&ha_rest_mutex);
+
+	if (0 != (rc = HycGetComponentStats(&g_stats))) {
+		if (rc == -EINVAL) {
+			set_err_msg(resp, TGT_ERR_GET_COMPONENT_STATS_FAILED,
+			"Failed to get component");
+		}
+		goto out;
+	}
+
+	json_t *stats = json_array();
+	json_array_append_new(stats, GetElement("read_requests", 
+		g_stats.vmdk_stats.read_requests, "read requests count"));
+	json_array_append_new(stats, GetElement("read_failed" , 
+		g_stats.vmdk_stats.read_failed, "read failed count"));
+	json_array_append_new(stats, GetElement("read_bytes", 
+		g_stats.vmdk_stats.read_bytes, "bytes read"));
+	
+	json_array_append_new(stats, GetElement("read_latency", g_stats.vmdk_stats.read_latency, "read latency"));
+
+	json_array_append_new(stats, GetElement( "write_requests", g_stats.vmdk_stats.write_requests, "write requests"));
+	json_array_append_new(stats, GetElement( "write_failed", g_stats.vmdk_stats.write_failed, "write failed"));
+	json_array_append_new(stats, GetElement( "write_same_requests", g_stats.vmdk_stats.write_same_requests, "write same requests"));
+	json_array_append_new(stats, GetElement( "write_same_failed", g_stats.vmdk_stats.write_same_failed, "write same failed"));
+	json_array_append_new(stats, GetElement( "write_bytes", g_stats.vmdk_stats.write_bytes, "write bytes"));
+	json_array_append_new(stats, GetElement( "write_latency", g_stats.vmdk_stats.write_latency, "write latency"));
+
+	json_array_append_new(stats, GetElement( "truncate_requests", g_stats.vmdk_stats.truncate_requests, "truncate requests"));
+	json_array_append_new(stats, GetElement( "truncate_failed", g_stats.vmdk_stats.truncate_failed, "truncate failed"));
+	json_array_append_new(stats, GetElement( "truncate_latency", g_stats.vmdk_stats.truncate_latency, "truncate latency"));
+
+	json_array_append_new(stats, GetElement( "pending", g_stats.vmdk_stats.pending, "pending requests"));
+	json_array_append_new(stats, GetElement( "rpc_requests_scheduled", g_stats.vmdk_stats.rpc_requests_scheduled, "number of scheduled requests"));
+
+	char *post_data = json_dumps(stats, JSON_ENCODE_ANY);
+	size_t index;
+	json_t *element;
+	json_array_foreach(stats, index, element) {
+		json_array_clear(element);
+	}
+	json_decref(stats);
+
+	ha_set_response_body(resp, HTTP_STATUS_OK, post_data, strlen(post_data));
+	free(post_data);
+
+out:
+	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
+	return HA_CALLBACK_CONTINUE;
+}
+
 
 int tgt_ha_start_cb(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
@@ -1280,7 +1352,7 @@ int main(int argc, char **argv)
 	int is_daemon = 1, is_debug = 0;
 	int ret;
 	struct ha_handlers *ep_handlers = malloc(sizeof(struct ha_handlers) +
-		6 * sizeof(struct ha_endpoint_handlers));
+		7 * sizeof(struct ha_endpoint_handlers));
 	char *etcd_ip = NULL;
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
@@ -1355,6 +1427,13 @@ int main(int argc, char **argv)
 	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "vmdk_stats",
 		strlen("vmdk_stats") + 1);
 	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = get_vmdk_stats;
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
+
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = GET;
+	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "get_component_stats",
+		strlen("get_component_stats") + 1);
+	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = get_component_stats;
 	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
 	ep_handlers->ha_count += 1;
 
