@@ -47,12 +47,12 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 				op = ABORT_TASK_SET_OP;
 				break;
 			default:
+				eprintf("skipped mgmt_cmd: %p op: %x\n", cmdp, mreq->function);
 				op = UNKNOWN;
 		}
-
-		eprintf("\n**** MTF: cmd: %p op: %x, function:%x\n", cmdp, scsi_op, op);
 		return op;
 	}
+
 	switch (scsi_op) {
 	case UNMAP:
 		return TRUNCATE;
@@ -277,7 +277,6 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 	case ABORT_TASK_OP:
 	case ABORT_TASK_SET_OP:
 		rc = HycScheduleAbort(infop->vmdk_handle, cmdp);
-		eprintf("\n ABORT REQUEST SENT to THRIFT CLIENT got reply rc:%d\n", rc);
 		return rc;
 	case WRITE_SAME_OP:
 	case UNKNOWN:
