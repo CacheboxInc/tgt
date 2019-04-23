@@ -1085,6 +1085,36 @@ static int target_delete(const _ha_request *reqp, _ha_response *resp, void *user
 	return HA_CALLBACK_CONTINUE;
 }
 
+static int set_wan_latency(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	int rc = 0;
+	const char *latency_str;
+	uint32_t latency;
+
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+	latency_str = ha_parameter_get(reqp, "latency");
+	rc = str_to_int(latency_str, latency);
+	if (rc) {
+		set_err_msg(resp, TGT_ERR_INVALID_DELETE_FORCE,
+			"invalid value for wan latency");
+		remove_rest_call();
+		return HA_CALLBACK_CONTINUE;
+	}
+	pthread_mutex_lock(&ha_rest_mutex);
+	//latency in microseconds unit
+	HycSetExpectedWanLatency(latency);
+	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
+
+	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
+	return HA_CALLBACK_CONTINUE;
+}
+
 static int lun_delete(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
@@ -1198,7 +1228,7 @@ int main(int argc, char **argv)
 	int is_daemon = 1, is_debug = 0;
 	int ret;
 	struct ha_handlers *ep_handlers = malloc(sizeof(struct ha_handlers) +
-		5 * sizeof(struct ha_endpoint_handlers));
+		6 * sizeof(struct ha_endpoint_handlers));
 	char *etcd_ip = NULL;
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
@@ -1268,6 +1298,14 @@ int main(int argc, char **argv)
 	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = lun_delete;
 	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
 	ep_handlers->ha_count += 1;
+
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
+	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "set_wan_latency",
+		strlen("set_wan_latency") + 1);
+	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = set_wan_latency;
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
+
 
 	while ((ch = getopt_long(argc, argv, short_options, long_options,
 				 &longindex)) >= 0) {
