@@ -1090,11 +1090,12 @@ static int set_wan_latency(const _ha_request *reqp,
 {
 	int rc = 0;
 	const char *latency_str;
-	uint32_t latency=20000; //default to 20 milliseconds
+	uint32_t latency;
 
 	if (disallow_rest_call()) {
 		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
 		"Too many pending requests at TGT. Retry after some time");
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 	latency_str = ha_parameter_get(reqp, "latency");
@@ -1104,13 +1105,10 @@ static int set_wan_latency(const _ha_request *reqp,
 			"invalid value for wan latency");
 		return HA_CALLBACK_CONTINUE;
 	}
+	pthread_mutex_lock(&ha_rest_mutex);
 	//latency in microseconds unit
-	rc = HycSetExpectedWanLatency(latency);
-	if (rc == 0) {
-		ha_set_empty_response_body(resp, HTTP_STATUS_OK);
-	} else {
-		ha_set_empty_response_body(resp, HTTP_STATUS_ERR);
-	}
+	HycSetExpectedWanLatency(latency);
+	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
 	pthread_mutex_unlock(&ha_rest_mutex);
 	remove_rest_call();
