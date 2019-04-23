@@ -1095,7 +1095,6 @@ static int set_wan_latency(const _ha_request *reqp,
 	if (disallow_rest_call()) {
 		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
 		"Too many pending requests at TGT. Retry after some time");
-		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 	latency_str = ha_parameter_get(reqp, "latency");
@@ -1103,6 +1102,7 @@ static int set_wan_latency(const _ha_request *reqp,
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_INVALID_DELETE_FORCE,
 			"invalid value for wan latency");
+		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
 	pthread_mutex_lock(&ha_rest_mutex);
