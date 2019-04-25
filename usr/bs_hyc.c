@@ -47,12 +47,12 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 				op = ABORT_TASK_SET_OP;
 				break;
 			default:
+				eprintf("skipped mgmt_cmd: %p op: %x\n", cmdp, mreq->function);
 				op = UNKNOWN;
 		}
-
-		eprintf("\n**** MTF: cmd: %p op: %x, function:%x\n", cmdp, scsi_op, op);
 		return op;
 	}
+
 	switch (scsi_op) {
 	case UNMAP:
 		return TRUNCATE;
@@ -79,6 +79,9 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 		break;
 	case SYNCHRONIZE_CACHE:
 	case SYNCHRONIZE_CACHE_16:
+		/* SYNCHRONIZE_CACHE (35h), SYNCHRONIZE_CACHE_16 (91h) */
+		op = SYNCHRONIZE_CACHE_OP;
+        break;
 	default:
 		eprintf("skipped cmd: %p op: %x\n", cmdp, scsi_op);
 		op = UNKNOWN;
@@ -88,7 +91,20 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 
 static uint64_t scsi_cmd_offset(struct scsi_cmd *cmdp)
 {
-	return cmdp->offset;
+	switch (scsi_cmd_operation(cmdp)) {
+	case READ:
+	case WRITE:
+	case WRITE_SAME_OP:
+		return cmdp->offset;
+	case SYNCHRONIZE_CACHE_OP:
+		return scsi_rw_offset(cmdp->scb);
+	case ABORT_TASK_OP:
+	case ABORT_TASK_SET_OP:
+		return 0;
+	default:
+		assert(0);
+	}
+	return 0;
 }
 
 static uint32_t scsi_cmd_length(struct scsi_cmd *cmdp)
@@ -99,6 +115,10 @@ static uint32_t scsi_cmd_length(struct scsi_cmd *cmdp)
 	case WRITE_SAME_OP:
 	case WRITE:
 		return scsi_get_out_transfer_len(cmdp);
+	case TRUNCATE:
+		return scsi_get_out_length(cmdp);
+	case SYNCHRONIZE_CACHE_OP:
+		return scsi_rw_count(cmdp->scb);
 	case ABORT_TASK_OP:
 	case ABORT_TASK_SET_OP:
 		return 0;
@@ -118,6 +138,7 @@ static char *scsi_cmd_buffer(struct scsi_cmd *cmdp)
 		return scsi_get_in_buffer(cmdp);
 	case WRITE:
 	case WRITE_SAME_OP:
+	case TRUNCATE:
 		return scsi_get_out_buffer(cmdp);
 	}
 }
@@ -132,8 +153,8 @@ static int bs_hyc_unmap(struct bs_hyc_info* infop, struct scsi_lu* lup,
 		return -1;
 	}
 
-	length = scsi_get_out_length(cmdp);
-	bufp = scsi_get_out_buffer(cmdp);
+	length = scsi_cmd_length(cmdp);
+	bufp = scsi_cmd_buffer(cmdp);
 	if (length < 0 || bufp == NULL) {
 		return 0;
 	}
@@ -142,6 +163,52 @@ static int bs_hyc_unmap(struct bs_hyc_info* infop, struct scsi_lu* lup,
 	bufp += 8;
 	set_cmd_async(cmdp);
 	return HycScheduleTruncate(infop->vmdk_handle, cmdp, bufp, length);
+}
+
+static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
+		struct scsi_cmd* cmdp)
+{
+	uint64_t lba;      // start lba
+	uint32_t num_blks; // end lba
+	int      result = SAM_STAT_GOOD;
+	uint8_t  key;
+	uint16_t asc;
+	uint16_t blk_shift = lup->blk_shift;
+
+	/* IMMED bit is set but it's not supported by device server */
+	if (cmdp->scb[1] & 0x2) {
+		asc = ASC_INVALID_FIELD_IN_CDB;
+		goto sense;
+	}
+
+	lba = scsi_cmd_offset(cmdp);
+	num_blks = scsi_cmd_length(cmdp);
+
+	/* num_blks set to 0 means all LBAs until end of device */
+	if (num_blks == 0) {
+		num_blks = (lup->size >> blk_shift) - lba;
+	}
+
+	/* Verify that we are not doing i/o beyond the end-of-lun */
+	if ((lba >= lup->size >> blk_shift) ||
+		((lba + num_blks) > lup->size >> blk_shift)) {
+		asc = ASC_LBA_OUT_OF_RANGE;
+		eprintf("SYNC error LBA out of range");
+		goto sense;
+	}
+
+	set_cmd_async(cmdp);
+	return HycScheduleSyncCache(infop->vmdk_handle, cmdp, lba << blk_shift,
+		num_blks << blk_shift);
+
+sense:
+	result = SAM_STAT_CHECK_CONDITION;
+	key = ILLEGAL_REQUEST;
+
+	scsi_set_result(cmdp, result);
+	sense_data_build(cmdp, key, asc);
+
+	return result;
 }
 
 static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
@@ -166,6 +233,8 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 		break;
 	case TRUNCATE:
 		return bs_hyc_unmap(infop, lup, cmdp);
+	case SYNCHRONIZE_CACHE_OP:
+		return bs_hyc_sync(infop, lup, cmdp);
 	case WRITE_SAME_OP:
 		return -1;
 	case UNKNOWN:
@@ -208,7 +277,6 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 	case ABORT_TASK_OP:
 	case ABORT_TASK_SET_OP:
 		rc = HycScheduleAbort(infop->vmdk_handle, cmdp);
-		eprintf("\n ABORT REQUEST SENT to THRIFT CLIENT got reply rc:%d\n", rc);
 		return rc;
 	case WRITE_SAME_OP:
 	case UNKNOWN:
