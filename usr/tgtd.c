@@ -1202,8 +1202,12 @@ static int get_vmdk_stats(const _ha_request *reqp,
 	}
 
 	json_t *jobj = json_object();
-	json_object_set_new(jobj, "pending", json_integer(vmdk_stats.pending));
-	json_object_set_new(jobj, "rpc_requests_scheduled", json_integer(vmdk_stats.rpc_requests_scheduled));
+	json_object_set_new(jobj, "batchsize_decr", json_integer(vmdk_stats.batchsize_decr));
+	json_object_set_new(jobj, "batchsize_incr", json_integer(vmdk_stats.batchsize_incr));
+	json_object_set_new(jobj, "batchsize_same", json_integer(vmdk_stats.batchsize_same));
+	json_object_set_new(jobj, "need_schedule_count", json_integer(vmdk_stats.need_schedule_count));
+	json_object_set_new(jobj, "stord_stats_pending", json_integer(vmdk_stats.stord_stats_pending));
+	json_object_set_new(jobj, "avg_batchsize", json_integer(vmdk_stats.avg_batchsize));
 
 	char *post_data = json_dumps(jobj, JSON_ENCODE_ANY);
 	json_decref(jobj);
