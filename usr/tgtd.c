@@ -1171,6 +1171,53 @@ static int set_batching_attributes(const _ha_request *reqp,
 	return HA_CALLBACK_CONTINUE;
 }
 
+
+static int get_vmdk_stats(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	int rc = 0;
+	vmdk_stats_t vmdk_stats = {0};
+
+	const char* vmdkid = ha_parameter_get(reqp, "vmdkid");
+	if (vmdkid == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"vmdkid param is not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	pthread_mutex_lock(&ha_rest_mutex);
+
+	if (0 != (rc = HycGetVmdkStats(vmdkid, &vmdk_stats))) {
+		if (rc == -EINVAL) {
+			set_err_msg(resp, TGT_ERR_INVALID_VMDKID,
+			"vmdkid is not valid/exist");
+		}
+		goto out;
+	}
+
+	json_t *jobj = json_object();
+	json_object_set_new(jobj, "pending", json_integer(vmdk_stats.pending));
+	json_object_set_new(jobj, "rpc_requests_scheduled", json_integer(vmdk_stats.rpc_requests_scheduled));
+
+	char *post_data = json_dumps(jobj, JSON_ENCODE_ANY);
+	json_decref(jobj);
+
+	ha_set_response_body(resp, HTTP_STATUS_OK, post_data, strlen(post_data));
+	free(post_data);
+
+out:
+	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
+	return HA_CALLBACK_CONTINUE;
+}
+
+
 static int lun_delete(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
@@ -1284,7 +1331,7 @@ int main(int argc, char **argv)
 	int is_daemon = 1, is_debug = 0;
 	int ret;
 	struct ha_handlers *ep_handlers = malloc(sizeof(struct ha_handlers) +
-		6 * sizeof(struct ha_endpoint_handlers));
+		7 * sizeof(struct ha_endpoint_handlers));
 	char *etcd_ip = NULL;
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
@@ -1362,6 +1409,12 @@ int main(int argc, char **argv)
 	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
 	ep_handlers->ha_count += 1;
 
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = GET;
+	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "get_vmdk_stats",
+		strlen("get_vmdk_stats") + 1);
+	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = get_vmdk_stats;
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
 
 	while ((ch = getopt_long(argc, argv, short_options, long_options,
 				 &longindex)) >= 0) {
