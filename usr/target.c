@@ -1163,6 +1163,7 @@ int target_cmd_perform(int tid, struct scsi_cmd *cmd)
 	enabled = cmd_enabled(q, cmd);
 	dprintf("%p %x %" PRIx64 " %d\n", cmd, cmd->scb[0], cmd->dev_id,
 		enabled);
+
 	if (enabled) {
 		result = scsi_cmd_perform(cmd->it_nexus->host_no, cmd);
 
@@ -1331,10 +1332,16 @@ static int abort_cmd(struct target *target, struct mgmt_req *mreq,
 		 */
 
 		cmd->mreq = mreq;
+#if !defined(HYC_ABORT_CMD)
+		err = -EBUSY;
+	} else {
+		cmd->dev->cmd_done(target, cmd);
+		target_cmd_io_done(cmd, TASK_ABORTED);
+#else
 		eprintf("\n%s: cmd:%p\n", __func__, cmd);
 		err = cmd->dev->cmd_perform(target->tid, cmd);
+#endif
 	}
-
 	return err;
 }
 
