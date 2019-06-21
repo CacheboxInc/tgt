@@ -1108,6 +1108,92 @@ static int target_delete(const _ha_request *reqp, _ha_response *resp, void *user
 	return HA_CALLBACK_CONTINUE;
 }
 
+static int set_batching_attributes(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	char *data = NULL;
+
+	data = ha_get_data(reqp);
+	if (data == NULL) {
+		set_err_msg(resp, TGT_ERR_NO_DATA,
+			"json config not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_error_t error;
+	json_auto_t *root = json_loads(data, 0, &error);
+
+	free(data);
+	if (root == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_JSON,
+			"json config is incorrect");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *wan_latency = json_object_get(root, "wan_latency");
+	if (!json_is_integer(wan_latency)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for wan MaxLatency, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *adaptive_batching = json_object_get(root, "adaptive_batching");
+	if (!json_is_integer(adaptive_batching)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for adaptive_batching, expected 1/0");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *batch_incr_val = json_object_get(root, "batch_incr_val");
+	if (!json_is_integer(batch_incr_val)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for batch_incr_val, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *batch_decr_pct = json_object_get(root, "batch_decr_pct");
+	if (!json_is_integer(batch_decr_pct)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for batch_decr_pct, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *system_load_factor = json_object_get(root, "system_load_factor");
+	if (!json_is_integer(system_load_factor)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for system_load_factor, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *debug_log = json_object_get(root, "debug_log");
+	if (!json_is_integer(debug_log)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for debug_log, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	pthread_mutex_lock(&ha_rest_mutex);
+	//latency in microseconds unit
+	HycSetBatchingAttributes(
+		json_integer_value(adaptive_batching),
+		json_integer_value(wan_latency),
+		json_integer_value(batch_incr_val),
+		json_integer_value(batch_decr_pct),
+		json_integer_value(system_load_factor),
+		json_integer_value(debug_log));
+	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
+
+	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
+	return HA_CALLBACK_CONTINUE;
+}
+
 static int lun_delete(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
@@ -1352,7 +1438,7 @@ int main(int argc, char **argv)
 	int is_daemon = 1, is_debug = 0;
 	int ret;
 	struct ha_handlers *ep_handlers = malloc(sizeof(struct ha_handlers) +
-		7 * sizeof(struct ha_endpoint_handlers));
+		8 * sizeof(struct ha_endpoint_handlers));
 	char *etcd_ip = NULL;
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
@@ -1427,6 +1513,13 @@ int main(int argc, char **argv)
 	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "vmdk_stats",
 		strlen("vmdk_stats") + 1);
 	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = get_vmdk_stats;
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
+
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
+	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "set_batching_attributes",
+		strlen("set_batching_attributes") + 1);
+	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = set_batching_attributes;
 	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
 	ep_handlers->ha_count += 1;
 
@@ -1521,7 +1614,7 @@ int main(int argc, char **argv)
 		free(stord_ip);
 		exit(1);
 	}
-	
+
 
 	ep_fd = epoll_create(4096);
 	if (ep_fd < 0) {
