@@ -31,6 +31,9 @@ struct iscsi_transport {
 	void (*ep_force_close)(struct iscsi_connection *conn);
 	void (*ep_release)(struct iscsi_connection *conn);
 
+	void (*ep_cork) (struct iscsi_connection* conn);
+	void (*ep_uncork) (struct iscsi_connection* conn);
+
 	int (*ep_show)(struct iscsi_connection *conn, char *buf, int rest);
 	void (*ep_event_modify)(struct iscsi_connection *conn, int events);
 	void *(*alloc_data_buf)(struct iscsi_connection *conn, size_t sz);

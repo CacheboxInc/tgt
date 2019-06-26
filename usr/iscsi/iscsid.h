@@ -34,6 +34,9 @@
 #include "iscsi_proto.h"
 #include "iscsi_if.h"
 
+#include "net_is.h"
+#include "net_os.h"
+
 #define cpu_to_be16(x)	__cpu_to_be16(x)
 #define cpu_to_be32(x)	__cpu_to_be32(x)
 #define cpu_to_be64(x)	__cpu_to_be64(x)
@@ -209,6 +212,8 @@ struct iscsi_connection {
 
 	struct iscsi_transport *tp;
 
+	struct net_is* in_stream;
+	struct net_os* out_stream;
 	struct iscsi_stats stats;
 };
 
