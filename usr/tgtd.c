@@ -51,6 +51,7 @@
 #define RETRY 24
 #define DELAY 5
 #define MAX_REST_CALLS 40
+#define MAX_NAME_LEN 7
 
 unsigned long pagesize, pageshift;
 
@@ -930,8 +931,8 @@ static int new_stord(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
 	char *data = NULL;
-
-	char *hyc_argv[1]   = {"tgtd"};
+	char tgt_name[MAX_NAME_LEN];
+	char *hyc_argv[1] = {tgt_name};
 	uint16_t stord_port = 0;
 
 	data = ha_get_data(reqp);
@@ -980,6 +981,13 @@ static int new_stord(const _ha_request *reqp,
 
 	}
 
+	json_t *tgt_idx = json_object_get(root, "TgtIndex");
+	if (!json_is_string(tgt_idx)) {
+		set_err_msg(resp, TGT_ERR_INVALID_STORD_IP,
+			"TgtIndex is not string");
+		return HA_CALLBACK_CONTINUE;
+	}
+
 	//TODO: Add error handling for Stord init
 	if (disallow_rest_call()) {
 		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
@@ -988,6 +996,9 @@ static int new_stord(const _ha_request *reqp,
 	}
 
 	pthread_mutex_lock(&ha_rest_mutex);
+	snprintf(tgt_name, sizeof(tgt_name), "tgtd%s",
+		json_string_value(tgt_idx));
+
 	HycStorInitialize(1, hyc_argv, (char *)json_string_value(sip),
 			stord_port);
 
