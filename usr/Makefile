@@ -74,11 +74,11 @@ HA_LIB += -lha $(HA_DEP_LIBS)
 LIBS += $(LIBS_GRP_START) $(HYC_LIBS) $(FOLLY_LIBS) $(THRIFT_LIBS) $(C++_LIBS)
 LIBS += $(COMPRESSION_LIBS) $(MISC_LIBS) $(HA_LIB) $(LIBS_GRP_END)
 
-ASAN_LIB :=
-ifneq ($(DEBUG), )
-ASAN_LIB = -lasan
-LIBS += $(ASAN_LIB)
-endif
+#ASAN_LIB :=
+#ifneq ($(DEBUG), )
+#ASAN_LIB = -lasan
+#LIBS += $(ASAN_LIB)
+#endif
 
 ifneq ($(SD_NOTIFY),)
 LIBS += -lsystemd
