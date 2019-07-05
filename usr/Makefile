@@ -46,11 +46,11 @@ INCLUDES += -I/$(TGT_DIR)/thirdparty/ha-lib/third-party/include/
 CFLAGS += -D_GNU_SOURCE
 CFLAGS += $(INCLUDES)
 
-ifneq ($(DEBUG),)
+ifeq ($(DEBUG), 1)
 CFLAGS += -g -O0 -ggdb -rdynamic
-CFLAGS += -fsanitize=address
+#CFLAGS += -fsanitize=address
 else
-CFLAGS += -g -O2 -fno-strict-aliasing
+CFLAGS += -O2 -fno-strict-aliasing
 endif
 CFLAGS += -Wall -Werror -fPIC
 CFLAGS += -DTGT_VERSION=\"$(VERSION)$(EXTRAVERSION)\"
