@@ -598,7 +598,7 @@ static void set_err_msg(_ha_response *resp, enum tgt_svc_err err,
 {
 	char *err_msg = ha_get_error_message(ha, err, msg);
 	ha_set_response_body(resp, HTTP_STATUS_ERR, err_msg,
-		strlen(err_msg) + 1);
+		strlen(err_msg));
 	free(err_msg);
 }
 
@@ -614,8 +614,10 @@ static int exec(char *cmd)
 		return -1;
 	}
 
-	ret = pclose(filp);
-	status = WEXITSTATUS(ret);
+	status = WEXITSTATUS(ret = pclose(filp));
+	if (!(ret < 0 || (status != 0 && status != 128+SIGPIPE))) {
+		status = 0;
+	}
 
 	return status;
 }
@@ -1050,6 +1052,25 @@ static int target_delete(const _ha_request *reqp, _ha_response *resp, void *user
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	pthread_mutex_lock(&ha_rest_mutex);
+
+	/*Verify target exist before unbind*/
+	memset(cmd, 0, sizeof(cmd));
+	len = snprintf(cmd, sizeof(cmd),
+			"tgtadm --lld iscsi --mode target --op show --tid=%s", tid);
+	if (len >= sizeof(cmd)) {
+		set_err_msg(resp, TGT_ERR_STR_OUT_OF_RANGE,
+			"tgt show cmd #characters out of range");
+		goto out;
+	}
+
+	rc = exec(cmd);
+	if (rc) {
+		snprintf(cmd, sizeof(cmd), "Can't find requested target id %s", tid);
+		set_err_msg(resp, TGT_ERR_INVALID_TARGET_NAME, cmd);
+		goto out;
+	}
+
 	/*Unbind before delete*/
 	memset(cmd, 0, sizeof(cmd));
 	len = snprintf(cmd, sizeof(cmd),
@@ -1058,10 +1079,8 @@ static int target_delete(const _ha_request *reqp, _ha_response *resp, void *user
 	if (len >= sizeof(cmd)) {
 		set_err_msg(resp, TGT_ERR_STR_OUT_OF_RANGE,
 			"tgt unbind cmd #characters out of range");
-		return HA_CALLBACK_CONTINUE;
+		goto out;
 	}
-
-	pthread_mutex_lock(&ha_rest_mutex);
 
 	//Ignoring error for now
 	rc = exec(cmd);
@@ -1080,9 +1099,7 @@ static int target_delete(const _ha_request *reqp, _ha_response *resp, void *user
 
 	if (len >= sizeof(cmd)) {
 		set_err_msg(resp, TGT_ERR_TOO_LONG, "tgt cmd too long");
-		pthread_mutex_unlock(&ha_rest_mutex);
-		remove_rest_call();
-		return HA_CALLBACK_CONTINUE;
+		goto out;
 	}
 
 	int retry = 2;
@@ -1097,13 +1114,13 @@ static int target_delete(const _ha_request *reqp, _ha_response *resp, void *user
 	}
 	if (rc) {
 		set_err_msg(resp, TGT_ERR_TARGET_DELETE, "target delete failed");
-		pthread_mutex_unlock(&ha_rest_mutex);
-		remove_rest_call();
-		return HA_CALLBACK_CONTINUE;
+		goto out;
 	}
 
-	pthread_mutex_unlock(&ha_rest_mutex);
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
+
+out:
+	pthread_mutex_unlock(&ha_rest_mutex);
 	remove_rest_call();
 	return HA_CALLBACK_CONTINUE;
 }
