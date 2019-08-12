@@ -31,6 +31,7 @@
 #include <netinet/tcp.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <assert.h>
 
 #include "iscsid.h"
 #include "tgtd.h"
@@ -48,18 +49,8 @@ static long nop_ttt;
 static int listen_fds[8];
 static struct iscsi_transport iscsi_tcp;
 
-struct iscsi_tcp_connection {
-	int fd;
-
-	struct list_head tcp_conn_siblings;
-	int nop_inflight_count;
-	int nop_interval;
-	int nop_tick;
-	int nop_count;
-	long ttt;
-
-	struct iscsi_connection iscsi_conn;
-};
+#define USE_NET_IN_STREAM 1
+#define USE_NET_OUT_STREAM 1
 
 static inline struct iscsi_tcp_connection *TCP_CONN(struct iscsi_connection *conn)
 {
@@ -131,6 +122,17 @@ static void iscsi_tcp_nop_reply(long ttt)
 		if (tcp_conn->ttt != ttt)
 			continue;
 		tcp_conn->nop_inflight_count = 0;
+	}
+}
+
+void for_each_tcp_connection(tcp_conn_func_t funcp, void* datap) {
+	struct iscsi_tcp_connection *tcp_conn;
+
+	list_for_each_entry(tcp_conn, &iscsi_tcp_conn_list, tcp_conn_siblings) {
+		if (funcp(tcp_conn, datap)) {
+			continue;
+		}
+		break;
 	}
 }
 
@@ -206,6 +208,20 @@ static int set_nodelay(int fd)
 	return ret;
 }
 
+static void dump_connection(const struct sockaddr_storage* fromp)
+{
+	socklen_t len = sizeof(*fromp);
+	char host[NI_MAXHOST];
+	char port[NI_MAXSERV];
+
+	int rc = getnameinfo((struct sockaddr *) fromp, len, host,
+			sizeof(host), port, sizeof(port), NI_NUMERICHOST | NI_NUMERICSERV);
+
+	if (rc == 0) {
+		eprintf("New connection from %s %s\n", host, port);
+	}
+}
+
 static void accept_connection(int afd, int events, void *data)
 {
 	struct sockaddr_storage from;
@@ -252,6 +268,12 @@ static void accept_connection(int afd, int events, void *data)
 	tcp_conn->fd = fd;
 	conn->tp = &iscsi_tcp;
 
+	conn->in_stream = net_is_alloc(fd, (1ul << 20) * 1);
+	assert(conn->in_stream);
+
+	conn->out_stream = net_os_alloc(fd, (1ul << 20) * 1);
+	assert(conn->out_stream);
+
 	conn_read_pdu(conn);
 	set_non_blocking(fd);
 
@@ -263,7 +285,7 @@ static void accept_connection(int afd, int events, void *data)
 	}
 
 	list_add(&tcp_conn->tcp_conn_siblings, &iscsi_tcp_conn_list);
-
+	dump_connection(&from);
 	return;
 out:
 	close(fd);
@@ -274,28 +296,48 @@ static void iscsi_tcp_event_handler(int fd, int events, void *data)
 {
 	struct iscsi_connection *conn = (struct iscsi_connection *) data;
 
-	if (events & EPOLLIN)
+	if (events & EPOLLIN) {
+#ifndef USE_NET_IN_STREAM
 		iscsi_rx_handler(conn);
+#else
+		do {
+			iscsi_rx_handler(conn);
+		} while (net_is_has_data(conn->in_stream));
+#endif
+	}
 
 	if (conn->state == STATE_CLOSE)
-		dprintf("connection closed\n");
+		eprintf("connection closed\n");
 
 	if (conn->state != STATE_CLOSE && events & EPOLLOUT) {
-		if (conn->state == STATE_SCSI) {
-			do {
-				int ret = iscsi_tx_handler(conn);
-				if (ret) {
-					break;
-				}
-			} while (conn->state == STATE_SCSI && !list_empty(&conn->tx_clist));
-		} else {
-			iscsi_tx_handler(conn);
+		conn->tp->ep_cork(conn);
+#ifndef USE_NET_OUT_STREAM
+		iscsi_tx_handler(conn);
+#else
+		int rc = 0;
+		iscsi_tx_handler(conn);
+		while (rc == 0 && conn->state == STATE_SCSI) {
+			rc = iscsi_tx_handler(conn);
 		}
+#endif
+		conn->tp->ep_uncork(conn);
 	}
 
 	if (conn->state == STATE_CLOSE) {
 		dprintf("connection closed %p\n", conn);
 		conn_close(conn);
+	} else {
+#ifdef USE_NET_OUT_STREAM
+		if (conn->state == STATE_SCSI) {
+			int events = EPOLLIN;
+			if (conn->tx_size ||
+					!list_empty(&conn->tx_clist) ||
+					net_os_has_data(conn->out_stream)) {
+				events |= EPOLLOUT;
+			}
+			conn->tp->ep_event_modify(conn, events);
+		}
+#endif
 	}
 }
 
@@ -491,26 +533,46 @@ static int iscsi_tcp_conn_login_complete(struct iscsi_connection *conn)
 static size_t iscsi_tcp_read(struct iscsi_connection *conn, void *buf,
 			     size_t nbytes)
 {
+#ifndef USE_NET_IN_STREAM
 	struct iscsi_tcp_connection *tcp_conn = TCP_CONN(conn);
 	return read(tcp_conn->fd, buf, nbytes);
+#else
+	ssize_t rc;
+	rc = net_is_read(conn->in_stream, buf, nbytes);
+	if (rc) {
+		return rc;
+	}
+	if (net_is_closed(conn->in_stream)) {
+		errno = ECONNRESET;
+		return 0;
+	}
+	errno = net_is_last_error(conn->in_stream);
+	return -1;
+#endif
 }
 
 static size_t iscsi_tcp_write_begin(struct iscsi_connection *conn, void *buf,
 				    size_t nbytes)
 {
+#ifndef USE_NET_OUT_STREAM
 	struct iscsi_tcp_connection *tcp_conn = TCP_CONN(conn);
-	int opt = 1;
-
-	setsockopt(tcp_conn->fd, SOL_TCP, TCP_CORK, &opt, sizeof(opt));
 	return write(tcp_conn->fd, buf, nbytes);
+#else
+	ssize_t rc = net_os_write(conn->out_stream, buf, nbytes);
+	if (rc) {
+		return rc;
+	}
+	if (net_os_closed(conn->out_stream)) {
+		errno = ECONNRESET;
+		return -1;
+	}
+	errno = net_os_last_error(conn->out_stream);
+	return -1;
+#endif
 }
 
 static void iscsi_tcp_write_end(struct iscsi_connection *conn)
 {
-	struct iscsi_tcp_connection *tcp_conn = TCP_CONN(conn);
-	int opt = 0;
-
-	setsockopt(tcp_conn->fd, SOL_TCP, TCP_CORK, &opt, sizeof(opt));
 }
 
 static size_t iscsi_tcp_close(struct iscsi_connection *conn)
@@ -638,6 +700,26 @@ void iscsi_print_nop_settings(struct concat_buf *b, int tid)
 	}
 }
 
+void iscsi_tcp_cork(struct iscsi_connection* conn)
+{
+	struct iscsi_tcp_connection *tcp_conn = TCP_CONN(conn);
+	int opt = 1;
+
+	setsockopt(tcp_conn->fd, SOL_TCP, TCP_CORK, &opt, sizeof(opt));
+}
+
+void iscsi_tcp_uncork(struct iscsi_connection* conn)
+{
+#ifdef USE_NET_OUT_STREAM
+	net_os_flush(conn->out_stream);
+#endif
+
+	struct iscsi_tcp_connection *tcp_conn = TCP_CONN(conn);
+	int opt = 0;
+
+	setsockopt(tcp_conn->fd, SOL_TCP, TCP_CORK, &opt, sizeof(opt));
+}
+
 static struct iscsi_transport iscsi_tcp = {
 	.name			= "iscsi",
 	.rdma			= 0,
@@ -660,6 +742,9 @@ static struct iscsi_transport iscsi_tcp = {
 	.ep_getsockname		= iscsi_tcp_getsockname,
 	.ep_getpeername		= iscsi_tcp_getpeername,
 	.ep_nop_reply		= iscsi_tcp_nop_reply,
+
+	.ep_cork = iscsi_tcp_cork,
+	.ep_uncork = iscsi_tcp_uncork,
 };
 
 __attribute__((constructor)) static void iscsi_transport_init(void)

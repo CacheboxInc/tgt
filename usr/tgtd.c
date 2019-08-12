@@ -39,6 +39,7 @@
 #include <sys/stat.h>
 #include "list.h"
 #include "tgtd.h"
+#include "iscsi/iscsid.h"
 #include "driver.h"
 #include "work.h"
 #include "util.h"
@@ -50,6 +51,7 @@
 #define RETRY 24
 #define DELAY 5
 #define MAX_REST_CALLS 40
+#define MAX_NAME_LEN 7
 
 unsigned long pagesize, pageshift;
 
@@ -575,6 +577,7 @@ enum tgt_svc_err {
 	TGT_ERR_INVALID_VMID,
 	TGT_ERR_INVALID_VMDKID,
 	TGT_ERR_LUN_CREATE,
+	TGT_ERR_LUN_UPDATE,
 	TGT_ERR_TOO_LONG,
 	TGT_ERR_TARGET_BIND,
 	TGT_ERR_SPARSE_FILE_DIR_CREATE,
@@ -590,6 +593,7 @@ enum tgt_svc_err {
 	TGT_ERR_LUN_DELETE,
 	TGT_ERR_STR_OUT_OF_RANGE,
 	TGT_ERR_HA_MAX_LIMIT,
+	TGT_ERR_GET_COMPONENT_STATS_FAILED,
 };
 
 static void set_err_msg(_ha_response *resp, enum tgt_svc_err err,
@@ -597,7 +601,7 @@ static void set_err_msg(_ha_response *resp, enum tgt_svc_err err,
 {
 	char *err_msg = ha_get_error_message(ha, err, msg);
 	ha_set_response_body(resp, HTTP_STATUS_ERR, err_msg,
-		strlen(err_msg) + 1);
+		strlen(err_msg));
 	free(err_msg);
 }
 
@@ -607,13 +611,16 @@ static int exec(char *cmd)
 	int ret = 0;
 	int status = 0;
 
+	eprintf("Executing command: %s\n", cmd);
 	filp = popen(cmd, "r");
 	if (filp == NULL) {
 		return -1;
 	}
 
-	ret = pclose(filp);
-	status = WEXITSTATUS(ret);
+	status = WEXITSTATUS(ret = pclose(filp));
+	if (!(ret < 0 || (status != 0 && status != 128+SIGPIPE))) {
+		status = 0;
+	}
 
 	return status;
 }
@@ -905,6 +912,27 @@ static int lun_create(const _ha_request *reqp,
 		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
+
+	len = snprintf(cmd, sizeof(cmd),
+		"tgtadm --op update --mode logicalunit --tid=%s --lun=%s --params thin_provisioning=1",
+		tid, lid);
+	if (len >= sizeof(cmd)) {
+		set_err_msg(resp, TGT_ERR_TOO_LONG,
+			"tgt cmd too long");
+		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	rc = exec(cmd);
+
+	if (rc) {
+		set_err_msg(resp, TGT_ERR_LUN_UPDATE,
+			"setting thin_provisioning failed");
+		pthread_mutex_unlock(&ha_rest_mutex);
+		remove_rest_call();
+		return HA_CALLBACK_CONTINUE;
+	}
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
 	pthread_mutex_unlock(&ha_rest_mutex);
@@ -916,8 +944,8 @@ static int new_stord(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
 	char *data = NULL;
-
-	char *hyc_argv[1]   = {"tgtd"};
+	char tgt_name[MAX_NAME_LEN];
+	char *hyc_argv[1] = {tgt_name};
 	uint16_t stord_port = 0;
 
 	data = ha_get_data(reqp);
@@ -966,6 +994,13 @@ static int new_stord(const _ha_request *reqp,
 
 	}
 
+	json_t *tgt_idx = json_object_get(root, "TgtIndex");
+	if (!json_is_string(tgt_idx)) {
+		set_err_msg(resp, TGT_ERR_INVALID_STORD_IP,
+			"TgtIndex is not string");
+		return HA_CALLBACK_CONTINUE;
+	}
+
 	//TODO: Add error handling for Stord init
 	if (disallow_rest_call()) {
 		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
@@ -974,6 +1009,9 @@ static int new_stord(const _ha_request *reqp,
 	}
 
 	pthread_mutex_lock(&ha_rest_mutex);
+	snprintf(tgt_name, sizeof(tgt_name), "tgtd%s",
+		json_string_value(tgt_idx));
+
 	HycStorInitialize(1, hyc_argv, (char *)json_string_value(sip),
 			stord_port);
 
@@ -985,8 +1023,31 @@ static int new_stord(const _ha_request *reqp,
 	return HA_CALLBACK_CONTINUE;
 }
 
-static int target_delete(const _ha_request *reqp,
-	_ha_response *resp, void *userp)
+static void thread_yield(pthread_mutex_t* mutexp, const int seconds) {
+	int rc;
+	struct timespec ts;
+	pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
+
+	rc = clock_gettime(CLOCK_REALTIME, &ts);
+	assert(rc == 0);
+	ts.tv_sec += seconds;
+	rc = pthread_cond_timedwait(&cond, mutexp, &ts);
+	(void) rc;
+}
+
+static void close_tcp_connection_and_yield(pthread_mutex_t* mutexp, const char* tidp) {
+	char cmd[512];
+	int len;
+	len = snprintf(cmd, sizeof(cmd),
+		"tgtadm --lld iscsi --mode target --op stop --tid=%s", tidp);
+	if (len >= sizeof(cmd)) {
+		return;
+	}
+	exec(cmd);
+	thread_yield(mutexp, DELAY);
+}
+
+static int target_delete(const _ha_request *reqp, _ha_response *resp, void *userp)
 {
 	char cmd[512];
 	const char *tid = ha_parameter_get(reqp, "tid");
@@ -994,17 +1055,17 @@ static int target_delete(const _ha_request *reqp,
 	int rc  = 0;
 	int len = 0;
 	int force = 0;
-	int retry;
-
-	retry = RETRY;
 
 	if (tid == NULL || force_param == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
 			"tid param not given");
 		return HA_CALLBACK_CONTINUE;
 	}
-
-	memset(cmd, 0, sizeof(cmd));
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
 
 	rc = str_to_int(force_param, force);
 	if (rc) {
@@ -1013,69 +1074,39 @@ static int target_delete(const _ha_request *reqp,
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	pthread_mutex_lock(&ha_rest_mutex);
+
+	/*Verify target exist before unbind*/
+	memset(cmd, 0, sizeof(cmd));
+	len = snprintf(cmd, sizeof(cmd),
+			"tgtadm --lld iscsi --mode target --op show --tid=%s", tid);
+	if (len >= sizeof(cmd)) {
+		set_err_msg(resp, TGT_ERR_STR_OUT_OF_RANGE,
+			"tgt show cmd #characters out of range");
+		goto out;
+	}
+
+	rc = exec(cmd);
+	if (rc) {
+		snprintf(cmd, sizeof(cmd), "Can't find requested target id %s", tid);
+		set_err_msg(resp, TGT_ERR_INVALID_TARGET_NAME, cmd);
+		goto out;
+	}
+
 	/*Unbind before delete*/
+	memset(cmd, 0, sizeof(cmd));
 	len = snprintf(cmd, sizeof(cmd),
 			"tgtadm --lld iscsi --mode target --op unbind --tid=%s"
 			" -I ALL", tid);
 	if (len >= sizeof(cmd)) {
 		set_err_msg(resp, TGT_ERR_STR_OUT_OF_RANGE,
 			"tgt unbind cmd #characters out of range");
-		return HA_CALLBACK_CONTINUE;
+		goto out;
 	}
-
-	if (disallow_rest_call()) {
-		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
-		"Too many pending requests at TGT. Retry after some time");
-		return HA_CALLBACK_CONTINUE;
-	}
-
-	pthread_mutex_lock(&ha_rest_mutex);
 
 	//Ignoring error for now
 	rc = exec(cmd);
-	memset(cmd, 0, sizeof(cmd));
-#if 0
-	/*
-	 * Keeping the below code in place for now as it is needed later.
-	 * Actual code must find proper connections, luns and delete them.
-	 */
 
-	/*conn delete*/
-	for (int i = 0; i < 20; i++) {
-		len = snprintf(cmd, sizeof(cmd),
-				"tgtadm --lld iscsi --mode conn --op delete --tid=%s"
-				" --sid %d --cid 0", tid, i);
-		if (len >= sizeof(cmd)) {
-			set_err_msg(resp, TGT_ERR_TOO_LONG,
-				"tgt cmd too long");
-			pthread_mutex_unlock(&ha_rest_mutex);
-			remove_rest_call();
-			return HA_CALLBACK_CONTINUE;
-		}
-
-		//Ignoring error for now
-		rc = exec(cmd);
-		memset(cmd, 0, sizeof(cmd));
-	}
-
-	/*lun delete*/
-	for (int i = 0; i < 20; i++) {
-		memset(cmd, 0, sizeof(cmd));
-		len = snprintf(cmd, sizeof(cmd),
-			"tgtadm --lld iscsi --mode logicalunit --op delete"
-			" --tid=%s --lun=%d", tid, i);
-		if (len >= sizeof(cmd)) {
-			set_err_msg(resp, TGT_ERR_TOO_LONG,
-				"tgt cmd too long");
-			pthread_mutex_unlock(&ha_rest_mutex);
-			remove_rest_call();
-			return HA_CALLBACK_CONTINUE;
-		}
-
-		//Ignoring error for now
-		rc = exec(cmd);
-	}
-#endif
 	/*actual target delete*/
 	memset(cmd, 0, sizeof(cmd));
 	if (force) {
@@ -1089,33 +1120,112 @@ static int target_delete(const _ha_request *reqp,
 	}
 
 	if (len >= sizeof(cmd)) {
-		set_err_msg(resp, TGT_ERR_TOO_LONG,
-			"tgt cmd too long");
-		pthread_mutex_unlock(&ha_rest_mutex);
-		remove_rest_call();
-		return HA_CALLBACK_CONTINUE;
+		set_err_msg(resp, TGT_ERR_TOO_LONG, "tgt cmd too long");
+		goto out;
 	}
+
+	int retry = 2;
 	while (retry > 0) {
 		rc = exec(cmd);
-		if (rc == TGTADM_LUN_ACTIVE ||
-			rc == TGTADM_TARGET_ACTIVE ||
-			rc == TGTADM_DRIVER_ACTIVE ||
-			rc == TGTADM_UNSUPPORTED_OPERATION) {
-			fprintf(stderr, "Retrying for errno: %d\n", rc);
-			sleep(DELAY);
+		if (rc != 0) {
+			close_tcp_connection_and_yield(&ha_rest_mutex, tid);
 			retry--;
 			continue;
 		}
 		break;
 	}
 	if (rc) {
-		set_err_msg(resp, TGT_ERR_TARGET_DELETE,
-			"target delete failed");
-		pthread_mutex_unlock(&ha_rest_mutex);
-		remove_rest_call();
+		set_err_msg(resp, TGT_ERR_TARGET_DELETE, "target delete failed");
+		goto out;
+	}
+
+	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
+
+out:
+	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
+	return HA_CALLBACK_CONTINUE;
+}
+
+static int set_batching_attributes(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	char *data = NULL;
+
+	data = ha_get_data(reqp);
+	if (data == NULL) {
+		set_err_msg(resp, TGT_ERR_NO_DATA,
+			"json config not given");
 		return HA_CALLBACK_CONTINUE;
 	}
 
+	json_error_t error;
+	json_auto_t *root = json_loads(data, 0, &error);
+
+	free(data);
+	if (root == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_JSON,
+			"json config is incorrect");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *wan_latency = json_object_get(root, "wan_latency");
+	if (!json_is_integer(wan_latency)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for wan MaxLatency, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *adaptive_batching = json_object_get(root, "adaptive_batching");
+	if (!json_is_integer(adaptive_batching)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for adaptive_batching, expected 1/0");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *batch_incr_val = json_object_get(root, "batch_incr_val");
+	if (!json_is_integer(batch_incr_val)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for batch_incr_val, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *batch_decr_pct = json_object_get(root, "batch_decr_pct");
+	if (!json_is_integer(batch_decr_pct)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for batch_decr_pct, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *system_load_factor = json_object_get(root, "system_load_factor");
+	if (!json_is_integer(system_load_factor)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for system_load_factor, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	json_t *debug_log = json_object_get(root, "debug_log");
+	if (!json_is_integer(debug_log)) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"invalid value for debug_log, expected int type");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	pthread_mutex_lock(&ha_rest_mutex);
+	//latency in microseconds unit
+	HycSetBatchingAttributes(
+		json_integer_value(adaptive_batching),
+		json_integer_value(wan_latency),
+		json_integer_value(batch_incr_val),
+		json_integer_value(batch_decr_pct),
+		json_integer_value(system_load_factor),
+		json_integer_value(debug_log));
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
 	pthread_mutex_unlock(&ha_rest_mutex);
@@ -1129,9 +1239,15 @@ static int lun_delete(const _ha_request *reqp,
 	char cmd[512];
 	int  rc, len;
 	const char *tid, *lid;
+	int tid_int;
 
 	rc = 0;
 
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
 	tid  = ha_parameter_get(reqp, "tid");
 	if (tid == NULL) {
 		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
@@ -1144,9 +1260,14 @@ static int lun_delete(const _ha_request *reqp,
 			"lid param not given");
 		return HA_CALLBACK_CONTINUE;
 	}
+	rc = str_to_int(tid, tid_int);
+	if (rc) {
+		set_err_msg(resp, TGT_ERR_INVALID_DELETE_FORCE,
+			"Invalid value for tid");
+		return HA_CALLBACK_CONTINUE;
+	}
 
 	memset(cmd, 0, sizeof(cmd));
-
 	len = snprintf(cmd, sizeof(cmd),
 		"tgtadm --lld iscsi --mode logicalunit --op delete"
 		" --tid=%s --lun=%s", tid, lid);
@@ -1157,17 +1278,19 @@ static int lun_delete(const _ha_request *reqp,
 		return HA_CALLBACK_CONTINUE;
 	}
 
-	if (disallow_rest_call()) {
-		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
-		"Too many pending requests at TGT. Retry after some time");
-		return HA_CALLBACK_CONTINUE;
-	}
-
 	pthread_mutex_lock(&ha_rest_mutex);
-	rc = exec(cmd);
+	int retry = 2;
+	while (retry > 0) {
+		rc = exec(cmd);
+		if (rc != 0) {
+			close_tcp_connection_and_yield(&ha_rest_mutex, tid);
+			--retry;
+			continue;
+		}
+		break;
+	}
 	if (rc) {
-		set_err_msg(resp, TGT_ERR_LUN_DELETE,
-			"TGT lun delete failed");
+		set_err_msg(resp, TGT_ERR_LUN_DELETE, "TGT lun delete failed");
 		pthread_mutex_unlock(&ha_rest_mutex);
 		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
@@ -1180,6 +1303,137 @@ static int lun_delete(const _ha_request *reqp,
 	return HA_CALLBACK_CONTINUE;
 }
 
+static int get_vmdk_stats(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	int rc = 0;
+	vmdk_stats_t vmdk_stats = {0};
+
+	const char* vmdkid = ha_parameter_get(reqp, "vmdkid");
+	if (vmdkid == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM,
+			"vmdkid param is not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	pthread_mutex_lock(&ha_rest_mutex);
+
+	if (0 != (rc = HycGetVmdkStats(vmdkid, &vmdk_stats))) {
+		if (rc == -EINVAL) {
+			set_err_msg(resp, TGT_ERR_INVALID_VMDKID,
+			"vmdkid is not valid/exist");
+		}
+		goto out;
+	}
+
+	json_t *jobj = json_object();
+	json_object_set_new(jobj, "read_requests", json_integer(vmdk_stats.read_requests));
+	json_object_set_new(jobj, "read_failed", json_integer(vmdk_stats.read_failed));
+	json_object_set_new(jobj, "read_bytes", json_integer(vmdk_stats.read_bytes));
+	json_object_set_new(jobj, "read_latency", json_integer(vmdk_stats.read_latency));
+
+	json_object_set_new(jobj, "write_requests", json_integer(vmdk_stats.write_requests));
+	json_object_set_new(jobj, "write_failed", json_integer(vmdk_stats.write_failed));
+	json_object_set_new(jobj, "write_same_requests", json_integer(vmdk_stats.write_same_requests));
+	json_object_set_new(jobj, "write_same_failed", json_integer(vmdk_stats.write_same_failed));
+	json_object_set_new(jobj, "write_bytes", json_integer(vmdk_stats.write_bytes));
+	json_object_set_new(jobj, "write_latency", json_integer(vmdk_stats.write_latency));
+
+	json_object_set_new(jobj, "truncate_requests", json_integer(vmdk_stats.truncate_requests));
+	json_object_set_new(jobj, "truncate_failed", json_integer(vmdk_stats.truncate_failed));
+	json_object_set_new(jobj, "truncate_latency", json_integer(vmdk_stats.truncate_latency));
+
+	json_object_set_new(jobj, "pending", json_integer(vmdk_stats.pending));
+	json_object_set_new(jobj, "rpc_requests_scheduled", json_integer(vmdk_stats.rpc_requests_scheduled));
+
+	char *post_data = json_dumps(jobj, JSON_ENCODE_ANY);
+	json_decref(jobj);
+
+	ha_set_response_body(resp, HTTP_STATUS_OK, post_data, strlen(post_data));
+	free(post_data);
+
+out:
+	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
+	return HA_CALLBACK_CONTINUE;
+}
+
+json_t* GetElement(const char* key, int64_t val, const char* descr) {
+	json_t* obj = json_array();
+	json_array_append_new(obj, json_string(key));
+	json_array_append_new(obj, json_integer(val));
+	json_array_append_new(obj, json_string(descr)); 
+	return obj;
+}
+
+static int get_component_stats(const _ha_request *reqp,
+	_ha_response *resp, void *userp)
+{
+	int rc = 0;
+	component_stats_t g_stats = {0};
+
+	if (disallow_rest_call()) {
+		set_err_msg(resp, TGT_ERR_HA_MAX_LIMIT,
+		"Too many pending requests at TGT. Retry after some time");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	pthread_mutex_lock(&ha_rest_mutex);
+
+	if (0 != (rc = HycGetComponentStats(&g_stats))) {
+		if (rc == -EINVAL) {
+			set_err_msg(resp, TGT_ERR_GET_COMPONENT_STATS_FAILED,
+			"Failed to get component");
+		}
+		goto out;
+	}
+
+	json_t *stats = json_array();
+	json_array_append_new(stats, GetElement("read_requests", 
+		g_stats.vmdk_stats.read_requests, "read requests count"));
+	json_array_append_new(stats, GetElement("read_failed" , 
+		g_stats.vmdk_stats.read_failed, "read failed count"));
+	json_array_append_new(stats, GetElement("read_bytes", 
+		g_stats.vmdk_stats.read_bytes, "bytes read"));
+	
+	json_array_append_new(stats, GetElement("read_latency", g_stats.vmdk_stats.read_latency, "read latency"));
+
+	json_array_append_new(stats, GetElement( "write_requests", g_stats.vmdk_stats.write_requests, "write requests"));
+	json_array_append_new(stats, GetElement( "write_failed", g_stats.vmdk_stats.write_failed, "write failed"));
+	json_array_append_new(stats, GetElement( "write_same_requests", g_stats.vmdk_stats.write_same_requests, "write same requests"));
+	json_array_append_new(stats, GetElement( "write_same_failed", g_stats.vmdk_stats.write_same_failed, "write same failed"));
+	json_array_append_new(stats, GetElement( "write_bytes", g_stats.vmdk_stats.write_bytes, "write bytes"));
+	json_array_append_new(stats, GetElement( "write_latency", g_stats.vmdk_stats.write_latency, "write latency"));
+
+	json_array_append_new(stats, GetElement( "truncate_requests", g_stats.vmdk_stats.truncate_requests, "truncate requests"));
+	json_array_append_new(stats, GetElement( "truncate_failed", g_stats.vmdk_stats.truncate_failed, "truncate failed"));
+	json_array_append_new(stats, GetElement( "truncate_latency", g_stats.vmdk_stats.truncate_latency, "truncate latency"));
+
+	json_array_append_new(stats, GetElement( "pending", g_stats.vmdk_stats.pending, "pending requests"));
+	json_array_append_new(stats, GetElement( "rpc_requests_scheduled", g_stats.vmdk_stats.rpc_requests_scheduled, "number of scheduled requests"));
+
+	char *post_data = json_dumps(stats, JSON_ENCODE_ANY);
+	size_t index;
+	json_t *element;
+	json_array_foreach(stats, index, element) {
+		json_array_clear(element);
+	}
+	json_decref(stats);
+
+	ha_set_response_body(resp, HTTP_STATUS_OK, post_data, strlen(post_data));
+	free(post_data);
+
+out:
+	pthread_mutex_unlock(&ha_rest_mutex);
+	remove_rest_call();
+	return HA_CALLBACK_CONTINUE;
+}
 
 
 int tgt_ha_start_cb(const _ha_request *reqp,
@@ -1223,7 +1477,7 @@ int main(int argc, char **argv)
 	int is_daemon = 1, is_debug = 0;
 	int ret;
 	struct ha_handlers *ep_handlers = malloc(sizeof(struct ha_handlers) +
-		5 * sizeof(struct ha_endpoint_handlers));
+		8 * sizeof(struct ha_endpoint_handlers));
 	char *etcd_ip = NULL;
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
@@ -1291,6 +1545,27 @@ int main(int argc, char **argv)
 	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "lun_delete",
 		strlen("lun_delete") + 1);
 	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = lun_delete;
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
+
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = GET;
+	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "vmdk_stats",
+		strlen("vmdk_stats") + 1);
+	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = get_vmdk_stats;
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
+
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
+	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "set_batching_attributes",
+		strlen("set_batching_attributes") + 1);
+	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = set_batching_attributes;
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
+	ep_handlers->ha_count += 1;
+
+	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = GET;
+	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "get_component_stats",
+		strlen("get_component_stats") + 1);
+	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = get_component_stats;
 	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
 	ep_handlers->ha_count += 1;
 
@@ -1378,7 +1653,7 @@ int main(int argc, char **argv)
 		free(stord_ip);
 		exit(1);
 	}
-	
+
 
 	ep_fd = epoll_create(4096);
 	if (ep_fd < 0) {

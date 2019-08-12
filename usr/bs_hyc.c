@@ -35,8 +35,27 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 {
 	unsigned int        scsi_op = (unsigned int) cmdp->scb[0];
 	io_type_t           op = UNKNOWN;
+	struct mgmt_req     *mreq;
+
+	mreq = cmdp->mreq;
+	if (mreq) {
+		switch(mreq->function) {
+			case ABORT_TASK:
+				op = ABORT_TASK_OP;
+				break;
+			case ABORT_TASK_SET:
+				op = ABORT_TASK_SET_OP;
+				break;
+			default:
+				eprintf("skipped mgmt_cmd: %p op: %x\n", cmdp, mreq->function);
+				op = UNKNOWN;
+		}
+		return op;
+	}
 
 	switch (scsi_op) {
+	case UNMAP:
+		return TRUNCATE;
 	case WRITE_6:
 	case WRITE_10:
 	case WRITE_12:
@@ -60,6 +79,9 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 		break;
 	case SYNCHRONIZE_CACHE:
 	case SYNCHRONIZE_CACHE_16:
+		/* SYNCHRONIZE_CACHE (35h), SYNCHRONIZE_CACHE_16 (91h) */
+		op = SYNCHRONIZE_CACHE_OP;
+        break;
 	default:
 		eprintf("skipped cmd: %p op: %x\n", cmdp, scsi_op);
 		op = UNKNOWN;
@@ -69,7 +91,20 @@ io_type_t scsi_cmd_operation(struct scsi_cmd *cmdp)
 
 static uint64_t scsi_cmd_offset(struct scsi_cmd *cmdp)
 {
-	return cmdp->offset;
+	switch (scsi_cmd_operation(cmdp)) {
+	case READ:
+	case WRITE:
+	case WRITE_SAME_OP:
+		return cmdp->offset;
+	case SYNCHRONIZE_CACHE_OP:
+		return scsi_rw_offset(cmdp->scb);
+	case ABORT_TASK_OP:
+	case ABORT_TASK_SET_OP:
+		return 0;
+	default:
+		assert(0);
+	}
+	return 0;
 }
 
 static uint32_t scsi_cmd_length(struct scsi_cmd *cmdp)
@@ -80,7 +115,14 @@ static uint32_t scsi_cmd_length(struct scsi_cmd *cmdp)
 	case WRITE_SAME_OP:
 	case WRITE:
 		return scsi_get_out_transfer_len(cmdp);
-	case UNKNOWN:
+	case TRUNCATE:
+		return scsi_get_out_length(cmdp);
+	case SYNCHRONIZE_CACHE_OP:
+		return scsi_rw_count(cmdp->scb);
+	case ABORT_TASK_OP:
+	case ABORT_TASK_SET_OP:
+		return 0;
+	default:
 		assert(0);
 	}
 	return 0;
@@ -96,8 +138,77 @@ static char *scsi_cmd_buffer(struct scsi_cmd *cmdp)
 		return scsi_get_in_buffer(cmdp);
 	case WRITE:
 	case WRITE_SAME_OP:
+	case TRUNCATE:
 		return scsi_get_out_buffer(cmdp);
 	}
+}
+
+static int bs_hyc_unmap(struct bs_hyc_info* infop, struct scsi_lu* lup,
+		struct scsi_cmd* cmdp)
+{
+	size_t length;
+	char* bufp;
+
+	if (!lup->attrs.thinprovisioning) {
+		return -1;
+	}
+
+	length = scsi_cmd_length(cmdp);
+	bufp = scsi_cmd_buffer(cmdp);
+	if (length < 0 || bufp == NULL) {
+		return 0;
+	}
+
+	length -= 8;
+	bufp += 8;
+	set_cmd_async(cmdp);
+	return HycScheduleTruncate(infop->vmdk_handle, cmdp, bufp, length);
+}
+
+static int bs_hyc_sync(struct bs_hyc_info* infop, struct scsi_lu* lup,
+		struct scsi_cmd* cmdp)
+{
+	uint64_t lba;      // start lba
+	uint32_t num_blks; // end lba
+	int      result = SAM_STAT_GOOD;
+	uint8_t  key;
+	uint16_t asc;
+	uint16_t blk_shift = lup->blk_shift;
+
+	/* IMMED bit is set but it's not supported by device server */
+	if (cmdp->scb[1] & 0x2) {
+		asc = ASC_INVALID_FIELD_IN_CDB;
+		goto sense;
+	}
+
+	lba = scsi_cmd_offset(cmdp);
+	num_blks = scsi_cmd_length(cmdp);
+
+	/* num_blks set to 0 means all LBAs until end of device */
+	if (num_blks == 0) {
+		num_blks = (lup->size >> blk_shift) - lba;
+	}
+
+	/* Verify that we are not doing i/o beyond the end-of-lun */
+	if ((lba >= lup->size >> blk_shift) ||
+		((lba + num_blks) > lup->size >> blk_shift)) {
+		asc = ASC_LBA_OUT_OF_RANGE;
+		eprintf("SYNC error LBA out of range");
+		goto sense;
+	}
+
+	set_cmd_async(cmdp);
+	return HycScheduleSyncCache(infop->vmdk_handle, cmdp, lba << blk_shift,
+		num_blks << blk_shift);
+
+sense:
+	result = SAM_STAT_CHECK_CONDITION;
+	key = ILLEGAL_REQUEST;
+
+	scsi_set_result(cmdp, result);
+	sense_data_build(cmdp, key, asc);
+
+	return result;
 }
 
 static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
@@ -105,10 +216,11 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 	struct scsi_lu     *lup = NULL;
 	struct bs_hyc_info *infop = NULL;
 	io_type_t           op;
-	size_t              length;
-	uint64_t            offset;
+	size_t              length = 0;
+	uint64_t            offset = 0;
 	char               *bufp = NULL;
 	RequestID           reqid = kInvalidRequestID;
+	int                 rc = 0;
 
 	lup = cmdp->dev;
 	infop = BS_HYC_I(lup);
@@ -116,34 +228,44 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 	assert(infop->vmdk_handle != kInvalidVmdkHandle);
 
 	op = scsi_cmd_operation(cmdp);
-	if (hyc_unlikely(op == WRITE_SAME_OP)) {
+	switch (op) {
+	default:
+		break;
+	case TRUNCATE:
+		return bs_hyc_unmap(infop, lup, cmdp);
+	case SYNCHRONIZE_CACHE_OP:
+		return bs_hyc_sync(infop, lup, cmdp);
+	case WRITE_SAME_OP:
 		return -1;
-	} else if (hyc_unlikely(op == UNKNOWN)) {
+	case UNKNOWN:
 		return 0;
 	}
 
-	offset = scsi_cmd_offset(cmdp);
-	length = scsi_cmd_length(cmdp);
+	if (op != ABORT_TASK_OP && op != ABORT_TASK_SET_OP) {
 
-	/*
-	 * Simply returing from top for zero size IOs, we may need to handle
-	 * it later for the barrier IOs
-	 */
+		offset = scsi_cmd_offset(cmdp);
+		length = scsi_cmd_length(cmdp);
 
-	if(op == WRITE) {
-		if (!length) {
-			eprintf("Zero size write IO, returning from top :%lu\n", length);
-			return 0;
+		/*
+		* Simply returing from top for zero size IOs, we may need to handle
+		* it later for the barrier IOs
+		*/
+
+		if (op == WRITE) {
+			if (!length) {
+				eprintf("Zero size write IO, returning from top :%lu\n", length);
+				return 0;
+			}
+		} else if (op == READ) {
+			if (!length) {
+				eprintf("Zero size read IO, returning from top :%lu\n", length);
+				return 0;
+			}
 		}
-	} else if(op == READ) {
-		if (!length) {
-			eprintf("Zero size read IO, returning from top :%lu\n", length);
-			return 0;
-		}
+
+		bufp = scsi_cmd_buffer(cmdp);
+		set_cmd_async(cmdp);
 	}
-
-	bufp = scsi_cmd_buffer(cmdp);
-	set_cmd_async(cmdp);
 
 	switch (op) {
 	case READ:
@@ -152,6 +274,10 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 	case WRITE:
 		reqid = HycScheduleWrite(infop->vmdk_handle, cmdp, bufp, length, offset);
 		break;
+	case ABORT_TASK_OP:
+	case ABORT_TASK_SET_OP:
+		rc = HycScheduleAbort(infop->vmdk_handle, cmdp);
+		return rc;
 	case WRITE_SAME_OP:
 	case UNKNOWN:
 	default:
@@ -174,34 +300,7 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 		return -EINVAL;
 	}
 
-	return 0;
-}
-
-static inline struct iscsi_connection*
-scsi_cmd_to_iscsi_connection(struct scsi_cmd* cmdp)
-{
-	struct iscsi_task* taskp = container_of(cmdp, struct iscsi_task, scmd);
-	if (hyc_unlikely(taskp->conn->state == STATE_CLOSE)) {
-		return NULL;
-	}
-
-	return taskp->conn;
-}
-
-static void post_scsi_completion(struct iscsi_connection* connp)
-{
-	if (connp == NULL) {
-		return;
-	}
-
-	if (hyc_likely(connp->state == STATE_SCSI)) {
-		do {
-			int ret = iscsi_tx_handler(connp);
-			if (hyc_unlikely(ret)) {
-				break;
-			}
-		} while (connp->state == STATE_SCSI && !list_empty(&connp->tx_clist));
-	}
+	return rc;
 }
 
 static void bs_hyc_handle_completion(int fd, int events, void *datap)
@@ -209,10 +308,8 @@ static void bs_hyc_handle_completion(int fd, int events, void *datap)
 	struct bs_hyc_info *infop;
 	struct RequestResult *resultsp;
 	bool has_more;
-	struct iscsi_connection* connp;
 
 	assert(datap);
-	connp = NULL;
 	infop = datap;
 	resultsp = infop->request_resultsp;
 	has_more = true;
@@ -224,16 +321,20 @@ static void bs_hyc_handle_completion(int fd, int events, void *datap)
 		/* Process completed request commands */
 		for (uint32_t i = 0; i < nr_results; ++i) {
 			struct scsi_cmd *cmdp = (struct scsi_cmd *) resultsp[i].privatep;
-			assert(cmdp);
-			struct iscsi_connection* cp = scsi_cmd_to_iscsi_connection(cmdp);
-
-			if (connp == NULL) {
-				connp = cp;
+			if (cmdp == NULL) {
+				continue;
 			}
-			assert(connp == cp);
 
-			assert(resultsp[i].result == 0);
-			target_cmd_io_done(cmdp, SAM_STAT_GOOD);
+			if (resultsp[i].result ==0) {
+				target_cmd_io_done(cmdp, SAM_STAT_GOOD);
+			} else {
+				eprintf("retry for vmid:%s, vmdkid:%s, path:%s, op_type:%d, offset:%lu, length:%u\n",
+					infop->vmid, infop->vmdkid, infop->lup->path,
+					scsi_cmd_operation(cmdp), scsi_cmd_offset(cmdp),
+					scsi_cmd_length(cmdp));
+				sense_data_build(cmdp, MEDIUM_ERROR, 0);
+				target_cmd_io_done(cmdp, SAM_STAT_CHECK_CONDITION);
+			}
 		}
 		memset(resultsp, 0, sizeof(*resultsp) * nr_results);
 
@@ -246,8 +347,6 @@ static void bs_hyc_handle_completion(int fd, int events, void *datap)
 			has_more = c != 0;
 		}
 	}
-
-	post_scsi_completion(connp);
 }
 
 static int bs_hyc_open(struct scsi_lu *lup, char *pathp,
@@ -286,8 +385,8 @@ static int bs_hyc_open(struct scsi_lu *lup, char *pathp,
 
 	infop->done_eventfd = efd;
 
-	rc = HycOpenVmdk(infop->vmid, infop->vmdkid, infop->done_eventfd,
-		&infop->vmdk_handle);
+	rc = HycOpenVmdk(infop->vmid, infop->vmdkid, *sizep, lup->blk_shift,
+		infop->done_eventfd, &infop->vmdk_handle);
 	if (rc < 0) {
 		goto error;
 	}

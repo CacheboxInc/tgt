@@ -1322,7 +1322,7 @@ static int abort_cmd(struct target *target, struct mgmt_req *mreq,
 {
 	int err = 0;
 
-	eprintf("found %" PRIx64 " %lx\n", cmd->tag, cmd->state);
+	eprintf("\nfound %" PRIx64 " %lx\n", cmd->tag, cmd->state);
 
 	if (cmd_processed(cmd)) {
 		/*
@@ -1332,10 +1332,15 @@ static int abort_cmd(struct target *target, struct mgmt_req *mreq,
 		 */
 
 		cmd->mreq = mreq;
+#if !defined(HYC_ABORT_CMD)
 		err = -EBUSY;
 	} else {
 		cmd->dev->cmd_done(target, cmd);
 		target_cmd_io_done(cmd, TASK_ABORTED);
+#else
+		eprintf("\n%s: cmd:%p\n", __func__, cmd);
+		err = cmd->dev->cmd_perform(target->tid, cmd);
+#endif
 	}
 	return err;
 }
@@ -1347,7 +1352,7 @@ static int abort_task_set(struct mgmt_req *mreq, struct target *target,
 	struct it_nexus *itn;
 	int err, count = 0;
 
-	eprintf("found %" PRIx64 " %d\n", tag, all);
+	eprintf("\nfound %" PRIx64 " %d\n", tag, all);
 
 	list_for_each_entry(itn, &target->it_nexus_list, nexus_siblings) {
 		list_for_each_entry_safe(cmd, tmp, &itn->cmd_list, c_hlist) {
@@ -2211,6 +2216,37 @@ tgtadm_err tgt_target_create(int lld, int tid, char *args)
 
 	dprintf("Succeed to create a new target %d\n", tid);
 
+	return TGTADM_SUCCESS;
+}
+
+static bool tcp_close(struct iscsi_tcp_connection* connp, void* datap) {
+	const int* const tidp = datap;
+	if (connp == NULL) {
+		eprintf("FATAL ERROR: connection NULL");
+		return false;
+	}
+	if (connp->iscsi_conn.tid != *tidp) {
+		return true;
+	}
+
+	int rc = shutdown(connp->fd, SHUT_RD);
+	if (rc < 0) {
+		eprintf("failed to close connetion fd %s\n", strerror(errno));
+	} else {
+		dprintf("closed read on socket tid = %d, fd = %d\n", *tidp, connp->fd);
+	}
+	return true;
+}
+
+tgtadm_err tgt_target_close_connections(int tid) {
+	struct target* targetp;
+
+	targetp = target_lookup(tid);
+	if (!targetp) {
+		return TGTADM_NO_TARGET;
+	}
+
+	for_each_tcp_connection(tcp_close, &tid);
 	return TGTADM_SUCCESS;
 }
 

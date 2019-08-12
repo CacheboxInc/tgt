@@ -22,6 +22,7 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <netdb.h>
+#include <stdbool.h>
 
 #include "transport.h"
 #include "list.h"
@@ -32,6 +33,9 @@
 
 #include "iscsi_proto.h"
 #include "iscsi_if.h"
+
+#include "net_is.h"
+#include "net_os.h"
 
 #define cpu_to_be16(x)	__cpu_to_be16(x)
 #define cpu_to_be32(x)	__cpu_to_be32(x)
@@ -208,7 +212,22 @@ struct iscsi_connection {
 
 	struct iscsi_transport *tp;
 
+	struct net_is* in_stream;
+	struct net_os* out_stream;
 	struct iscsi_stats stats;
+};
+
+struct iscsi_tcp_connection {
+	int fd;
+
+	struct list_head tcp_conn_siblings;
+	int nop_inflight_count;
+	int nop_interval;
+	int nop_tick;
+	int nop_count;
+	long ttt;
+
+	struct iscsi_connection iscsi_conn;
 };
 
 #define STATE_FREE		0
@@ -383,4 +402,6 @@ extern int isns_scn_access(int tid, char *name);
 extern int isns_target_register(char *name);
 extern int isns_target_deregister(char *name);
 
+typedef bool (*tcp_conn_func_t)(struct iscsi_tcp_connection*, void*);
+extern void for_each_tcp_connection(tcp_conn_func_t funcp, void*);
 #endif	/* ISCSID_H */
