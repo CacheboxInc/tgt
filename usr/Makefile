@@ -70,7 +70,8 @@ THRIFT_LIBS += -lthrift-core -lprotocol -lconcurrency -ltransport -lasync
 THRIFT_LIBS += -lsecurity -lserver -lthriftfrozen2 -lthriftprotocol
 THRIFT_LIBS += -lthriftcpp2 -lwangle -latomic
 
-HA_DEP_LIBS += -lulfius -lmicrohttpd -lcurl -lcrypto -lssl -lyder -ljansson -lorcania -lpthread -lbase64  -lgnutls -lgcrypt
+HA_DEP_LIBS += -lulfius -lmicrohttpd -lcurl -lcrypto -lssl -lyder -ljansson
+HA_DEP_LIBS += -lorcania -lpthread -lbase64  -lgnutls -lgcrypt -lidn2
 HA_LIB += -lha $(HA_DEP_LIBS)
 
 LIBS += $(LIBS_GRP_START) $(HYC_LIBS) $(FOLLY_LIBS) $(THRIFT_LIBS) $(C++_LIBS)
