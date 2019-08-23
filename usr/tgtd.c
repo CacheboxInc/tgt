@@ -881,7 +881,7 @@ static int lun_create(const _ha_request *reqp,
 
 	memset(dev_path, 0, sizeof(dev_path));
 
-	len = snprintf(dev_path, sizeof(dev_path), "%s/%s", hyc_sparse_files_loc,
+	len = snprintf(dev_path, sizeof(dev_path), "\"%s/%s\"", hyc_sparse_files_loc,
 		json_string_value(dev_name));
 	if (len >= sizeof(dev_path)) {
 		set_err_msg(resp, TGT_ERR_TOO_LONG,
