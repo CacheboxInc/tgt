@@ -68,6 +68,7 @@ static pthread_mutex_t ha_mutex;
 static pthread_mutex_t ha_rest_mutex;
 int active_rest_calls = 0;
 static pthread_mutex_t ha_active_call_cnt_mutex;
+char tgt_name[MAX_NAME_LEN];
 
 static struct option const long_options[] = {
 	{"foreground", no_argument, 0, 'f'},
@@ -944,8 +945,7 @@ static int new_stord(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
 	char *data = NULL;
-	char tgt_name[MAX_NAME_LEN];
-	char *hyc_argv[1] = {tgt_name};
+	char *hyc_argv[] = {tgt_name, NULL};
 	uint16_t stord_port = 0;
 
 	data = ha_get_data(reqp);
