@@ -100,9 +100,9 @@ static uint64_t scsi_cmd_offset(struct scsi_cmd *cmdp)
 		return scsi_rw_offset(cmdp->scb);
 	case ABORT_TASK_OP:
 	case ABORT_TASK_SET_OP:
-		return 0;
+	case TRUNCATE:
 	default:
-		assert(0);
+		break;
 	}
 	return 0;
 }
@@ -121,9 +121,8 @@ static uint32_t scsi_cmd_length(struct scsi_cmd *cmdp)
 		return scsi_rw_count(cmdp->scb);
 	case ABORT_TASK_OP:
 	case ABORT_TASK_SET_OP:
-		return 0;
 	default:
-		assert(0);
+		break;
 	}
 	return 0;
 }
@@ -132,7 +131,6 @@ static char *scsi_cmd_buffer(struct scsi_cmd *cmdp)
 {
 	switch (scsi_cmd_operation(cmdp)) {
 	default:
-		assert(0);
 		return NULL;
 	case READ:
 		return scsi_get_in_buffer(cmdp);
