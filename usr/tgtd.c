@@ -595,6 +595,7 @@ enum tgt_svc_err {
 	TGT_ERR_STR_OUT_OF_RANGE,
 	TGT_ERR_HA_MAX_LIMIT,
 	TGT_ERR_GET_COMPONENT_STATS_FAILED,
+	TGT_ERR_TARGET_UNBIND,
 };
 
 static void set_err_msg(_ha_response *resp, enum tgt_svc_err err,
@@ -1147,6 +1148,62 @@ out:
 	return HA_CALLBACK_CONTINUE;
 }
 
+static int target_unbind(const _ha_request *reqp, _ha_response *resp, void *userp) {
+	if (reqp == NULL || resp == NULL) {
+		set_err_msg(resp, TGT_ERR_TARGET_UNBIND,
+			"Target unbind failed. Unexpected arguments");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	const char *tid = ha_parameter_get(reqp, "tid");
+	if (tid == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM, "TID param not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	char cmd[512];
+	int len = snprintf(cmd, sizeof(cmd),
+		"tgtadm --lld iscsi --mode target --op unbind --tid=%s -I ALL", tid);
+	if (len >= sizeof(cmd)) {
+		set_err_msg(resp, TGT_ERR_STR_OUT_OF_RANGE, "TID out of range");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	int rc = exec(cmd);
+	if (rc != 0) {
+		set_err_msg(resp, TGT_ERR_TARGET_UNBIND, "Target unbind failed");
+	}
+	return HA_CALLBACK_CONTINUE;
+}
+
+static int target_bind(const _ha_request *reqp, _ha_response *resp, void *userp) {
+	if (reqp == NULL || resp == NULL) {
+		set_err_msg(resp, TGT_ERR_TARGET_BIND,
+			"Target unbind failed. Unexpected arguments");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	const char *tid = ha_parameter_get(reqp, "tid");
+	if (tid == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_PARAM, "TID param not given");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	char cmd[512];
+	int len = snprintf(cmd, sizeof(cmd),
+		"tgtadm --lld iscsi --mode target --op bind --tid=%s -I ALL", tid);
+	if (len >= sizeof(cmd)) {
+		set_err_msg(resp, TGT_ERR_STR_OUT_OF_RANGE, "TID out of range");
+		return HA_CALLBACK_CONTINUE;
+	}
+
+	int rc = exec(cmd);
+	if (rc != 0) {
+		set_err_msg(resp, TGT_ERR_TARGET_BIND, "Target unbind failed");
+	}
+	return HA_CALLBACK_CONTINUE;
+}
+
 static int set_batching_attributes(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
@@ -1469,6 +1526,24 @@ int tgt_ha_stop_cb(const _ha_request *reqp,
 	return HA_CALLBACK_CONTINUE;
 }
 
+struct EndPoint {
+	int method;
+	char* url;
+	int (*cb) (const _ha_request *request, _ha_response* resp, void* data);
+} end_points[] = {
+	{POST, "new_stord", new_stord},
+	{POST, "target_create", target_create},
+	{POST, "lun_create", lun_create},
+	{POST, "target_bind", target_bind},
+	{POST, "target_unbind", target_unbind},
+	{POST, "lun_delete", lun_delete},
+	{POST, "target_delete", target_delete},
+	{POST, "set_batching_attributes", set_batching_attributes},
+
+	{GET, "get_component_stats", get_component_stats},
+	{GET, "vmdk_stats", get_vmdk_stats},
+};
+
 int main(int argc, char **argv)
 {
 	struct sigaction sa_old;
@@ -1476,18 +1551,36 @@ int main(int argc, char **argv)
 	int err, ch, longindex, nr_lld = 0;
 	int is_daemon = 1, is_debug = 0;
 	int ret;
-	struct ha_handlers *ep_handlers = malloc(sizeof(struct ha_handlers) +
-		8 * sizeof(struct ha_endpoint_handlers));
 	char *etcd_ip = NULL;
 	char *svc_label = NULL;
 	char *tgt_version = NULL;
 	int ha_svc_port = 0;
 	char *stord_ip = NULL;
 	uint16_t stord_port = 0;
-	int *ha_handler_idx;
 
-	if (ep_handlers == NULL)
-		exit(1);
+	const size_t nend_points = sizeof(end_points) / sizeof(end_points[0]);
+	struct ha_handlers* handlers;
+	int i;
+
+	handlers = malloc(
+		sizeof(*handlers) +
+		nend_points * sizeof(handlers->ha_endpoints[0])
+	);
+	if (handlers == NULL) {
+		eprintf(" Allocating memory for EndPoints failed.\n");
+		return ENOMEM;
+	}
+	struct ha_endpoint_handlers* destp = handlers->ha_endpoints;
+	struct EndPoint* srcp = end_points;
+	for (i = 0; i < nend_points; ++i, ++destp, ++srcp) {
+		destp->ha_http_method = srcp->method;
+		snprintf(destp->ha_url_endpoint, sizeof(destp->ha_url_endpoint),
+			"%s", srcp->url);
+		destp->callback_function = srcp->cb;
+		destp->ha_user_data = NULL;
+	}
+	handlers->ha_count = nend_points;
+
 	sa_new.sa_handler = signal_catch;
 	sigemptyset(&sa_new.sa_mask);
 	sa_new.sa_flags = 0;
@@ -1509,65 +1602,6 @@ int main(int argc, char **argv)
 
 	if (pthread_mutex_init(&ha_active_call_cnt_mutex, NULL) != 0)
 		exit(1);
-
-	ep_handlers->ha_count = 0;
-	ha_handler_idx = &ep_handlers->ha_count;
-
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
-	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint,
-			"target_create", strlen("target_create") + 1);
-	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = target_create;
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
-	ep_handlers->ha_count += 1;
-
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
-	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "lun_create",
-		strlen("lun_create") + 1);
-	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = lun_create;
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
-	ep_handlers->ha_count += 1;
-
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
-	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "new_stord",
-		strlen("new_stord") + 1);
-	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = new_stord;
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
-	ep_handlers->ha_count += 1;
-
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
-	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "target_delete",
-		strlen("target_delete") + 1);
-	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = target_delete;
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
-	ep_handlers->ha_count += 1;
-
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
-	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "lun_delete",
-		strlen("lun_delete") + 1);
-	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = lun_delete;
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
-	ep_handlers->ha_count += 1;
-
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = GET;
-	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "vmdk_stats",
-		strlen("vmdk_stats") + 1);
-	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = get_vmdk_stats;
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
-	ep_handlers->ha_count += 1;
-
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = POST;
-	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "set_batching_attributes",
-		strlen("set_batching_attributes") + 1);
-	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = set_batching_attributes;
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
-	ep_handlers->ha_count += 1;
-
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_http_method = GET;
-	strncpy(ep_handlers->ha_endpoints[*ha_handler_idx].ha_url_endpoint, "get_component_stats",
-		strlen("get_component_stats") + 1);
-	ep_handlers->ha_endpoints[*ha_handler_idx].callback_function = get_component_stats;
-	ep_handlers->ha_endpoints[*ha_handler_idx].ha_user_data = NULL;
-	ep_handlers->ha_count += 1;
 
 	while ((ch = getopt_long(argc, argv, short_options, long_options,
 				 &longindex)) >= 0) {
@@ -1635,21 +1669,20 @@ int main(int argc, char **argv)
 		free(etcd_ip);
 		free(svc_label);
 		free(tgt_version);
-		free(ep_handlers);
+		free(handlers);
 		free(stord_ip);
 		usage(0);
 		exit(1);
 	}
 
 	ha = ha_initialize(ha_svc_port, etcd_ip, svc_label, tgt_version, 120,
-			ep_handlers, tgt_ha_start_cb, tgt_ha_stop_cb, 0 , NULL);
-
+			handlers, tgt_ha_start_cb, tgt_ha_stop_cb, 0 , NULL);
 	if (ha == NULL) {
 		fprintf(stderr, "ha_initilize failed\n");
 		free(etcd_ip);
 		free(svc_label);
 		free(tgt_version);
-		free(ep_handlers);
+		free(handlers);
 		free(stord_ip);
 		exit(1);
 	}
@@ -1722,7 +1755,7 @@ int main(int argc, char **argv)
 	free(etcd_ip);
 	free(svc_label);
 	free(tgt_version);
-	free(ep_handlers);
+	free(handlers);
 	free(stord_ip);
 
 	log_close();

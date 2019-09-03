@@ -263,6 +263,27 @@ tgtadm_err conn_close_admin(uint32_t tid, uint64_t sid, uint32_t cid)
 	return sess_found ? TGTADM_NO_CONNECTION : TGTADM_NO_SESSION;
 }
 
+tgtadm_err conn_close_all(uint32_t tid)
+{
+	struct iscsi_target* target;
+	struct iscsi_session* session;
+	struct iscsi_connection *conn;
+
+	target = target_find_by_id(tid);
+	if (!target) {
+		return TGTADM_NO_TARGET;
+	}
+
+	list_for_each_entry(session, &target->sessions_list, slist) {
+		list_for_each_entry(conn, &session->conn_list, clist) {
+			eprintf("close %u %u\n", session->tsih, conn->cid);
+			conn->tp->ep_force_close(conn);
+		}
+	}
+
+	return TGTADM_SUCCESS;
+}
+
 void iscsi_update_conn_stats_rx(struct iscsi_connection *conn, int size, int opcode)
 {
 	conn->stats.rxdata_octets += (uint64_t)size;

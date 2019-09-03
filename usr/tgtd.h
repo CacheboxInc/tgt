@@ -170,6 +170,8 @@ struct backingstore_template {
 	tgtadm_err (*bs_init)(struct scsi_lu *dev, char *bsopts);
 	void (*bs_exit)(struct scsi_lu *dev);
 	int (*bs_cmd_submit)(struct scsi_cmd *cmd);
+	int (*bs_cmd_abort)(struct scsi_cmd* cmd);
+	int (*bs_stop)(struct scsi_lu *dev);
 	int bs_oflags_supported;
 	unsigned long bs_supported_ops[NR_SCSI_OPCODES / __WORDSIZE];
 
@@ -275,6 +277,7 @@ extern tgtadm_err tgt_device_path_update(struct target *target, struct scsi_lu *
 
 extern tgtadm_err tgt_target_create(int lld, int tid, char *args);
 extern tgtadm_err tgt_target_destroy(int lld, int tid, int force);
+extern tgtadm_err tgt_target_stop(int lld, int tid, int force);
 extern tgtadm_err tgt_target_close_connections(int tid);
 extern char *tgt_targetname(int tid);
 extern tgtadm_err tgt_target_show_all(struct concat_buf *b);

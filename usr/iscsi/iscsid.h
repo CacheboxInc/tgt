@@ -337,6 +337,7 @@ extern struct iscsi_connection * conn_find(struct iscsi_session *session, uint32
 extern int conn_take_fd(struct iscsi_connection *conn);
 extern void conn_add_to_session(struct iscsi_connection *conn, struct iscsi_session *session);
 extern tgtadm_err conn_close_admin(uint32_t tid, uint64_t sid, uint32_t cid);
+extern tgtadm_err conn_close_all(uint32_t tid);
 
 /* iscsid.c */
 extern char *text_key_find(struct iscsi_connection *conn, char *searchKey);

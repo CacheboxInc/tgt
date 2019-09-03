@@ -714,6 +714,28 @@ fail_lu_init:
 	goto out;
 }
 
+tgtadm_err tgt_device_stop(int tid, uint64_t lun, int force)
+{
+	struct scsi_lu *lu;
+	struct target* target;
+
+	if (lun == 0)  {
+		eprintf(" no such lun tid = %d lun = %"PRIu64 "\n", tid, lun);
+		return TGTADM_INVALID_REQUEST;
+	}
+
+	lu =  __device_lookup(tid, lun, &target);
+	if (lu == NULL) {
+		eprintf(" no such lun tid = %d lun = %"PRIu64 "\n", tid, lun);
+		return TGTADM_NO_LUN;
+	}
+
+	if (lu->bst->bs_stop) {
+		return lu->bst->bs_stop(lu);
+	}
+	return TGTADM_SUCCESS;
+}
+
 tgtadm_err tgt_device_destroy(int tid, uint64_t lun, int force)
 {
 	struct target *target;
@@ -1332,15 +1354,18 @@ static int abort_cmd(struct target *target, struct mgmt_req *mreq,
 		 */
 
 		cmd->mreq = mreq;
-#if !defined(HYC_ABORT_CMD)
+		if (cmd->dev->bst->bs_cmd_abort) {
+			err = cmd->dev->bst->bs_cmd_abort(cmd);
+			if (err == 0) {
+				target_cmd_io_done(cmd, TASK_ABORTED);
+			} else {
+				eprintf(" abort failed %" PRIx64 " %lx\n", cmd->tag, cmd->state);
+			}
+		}
 		err = -EBUSY;
 	} else {
 		cmd->dev->cmd_done(target, cmd);
 		target_cmd_io_done(cmd, TASK_ABORTED);
-#else
-		eprintf("\n%s: cmd:%p\n", __func__, cmd);
-		err = cmd->dev->cmd_perform(target->tid, cmd);
-#endif
 	}
 	return err;
 }
@@ -2219,35 +2244,31 @@ tgtadm_err tgt_target_create(int lld, int tid, char *args)
 	return TGTADM_SUCCESS;
 }
 
-static bool tcp_close(struct iscsi_tcp_connection* connp, void* datap) {
-	const int* const tidp = datap;
-	if (connp == NULL) {
-		eprintf("FATAL ERROR: connection NULL");
-		return false;
-	}
-	if (connp->iscsi_conn.tid != *tidp) {
-		return true;
-	}
-
-	int rc = shutdown(connp->fd, SHUT_RD);
-	if (rc < 0) {
-		eprintf("failed to close connetion fd %s\n", strerror(errno));
-	} else {
-		dprintf("closed read on socket tid = %d, fd = %d\n", *tidp, connp->fd);
-	}
-	return true;
+tgtadm_err tgt_target_close_connections(int tid) {
+	return conn_close_all(tid);
 }
 
-tgtadm_err tgt_target_close_connections(int tid) {
-	struct target* targetp;
+tgtadm_err tgt_target_stop(int lld_no, int tid, int force)
+{
+	struct target* target;
+	tgtadm_err adm_err;
+	struct scsi_lu *lu;
 
-	targetp = target_lookup(tid);
-	if (!targetp) {
+	target = target_lookup(tid);
+	if (target == NULL) {
 		return TGTADM_NO_TARGET;
 	}
 
-	for_each_tcp_connection(tcp_close, &tid);
-	return TGTADM_SUCCESS;
+	list_for_each_entry(lu, &target->device_list, device_siblings) {
+		if (lu->lun == 0) {
+			continue;
+		}
+		adm_err = tgt_device_stop(tid, lu->lun, 1);
+		if (adm_err != TGTADM_SUCCESS) {
+			return adm_err;
+		}
+	}
+	return adm_err;
 }
 
 tgtadm_err tgt_target_destroy(int lld_no, int tid, int force)

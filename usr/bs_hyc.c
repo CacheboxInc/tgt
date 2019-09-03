@@ -192,6 +192,21 @@ sense:
 	return result;
 }
 
+static int bs_hyc_cmd_abort(struct scsi_cmd* cmdp)
+{
+	if (cmdp == NULL) {
+		return -EINVAL;
+	}
+
+	struct scsi_lu* lup = cmdp->dev;
+	struct bs_hyc_info* infop = BS_HYC_I(lup);
+	if (infop->vmdk_handle == kInvalidVmdkHandle) {
+		return -EINVAL;
+	}
+	RequestID reqid = HycScheduleAbort(infop->vmdk_handle, cmdp);
+	return reqid == kInvalidRequestID ? -EINVAL : 0;
+}
+
 static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 {
 	struct scsi_lu     *lup = NULL;
@@ -282,6 +297,39 @@ static int bs_hyc_cmd_submit(struct scsi_cmd *cmdp)
 	}
 
 	return rc;
+}
+
+static int bs_hyc_stop(struct scsi_lu* lup)
+{
+	struct bs_hyc_info *infop = BS_HYC_I(lup);
+	struct ScheduledRequest *requests;
+	uint32_t nrequests;
+	int rc;
+	int i;
+	tgtadm_err res;
+
+	requests = NULL;
+	rc = HycGetAllScheduledRequests(infop->vmdk_handle, &requests, &nrequests);
+	if (hyc_unlikely(rc < 0 || requests == NULL)) {
+		return TGTADM_TARGET_ACTIVE;
+	} else if (nrequests == 0) {
+		return TGTADM_SUCCESS;
+	}
+	res = TGTADM_SUCCESS;
+	for (i = 0; i < nrequests; ++i) {
+		struct scsi_cmd *cmdp = (struct scsi_cmd *) requests[i].privatep;
+		if (hyc_unlikely(cmdp == NULL)) {
+			continue;
+		}
+		rc = HycScheduleAbort(infop->vmdk_handle, cmdp);
+		if (hyc_unlikely(rc == kInvalidRequestID)) {
+			res = TGTADM_TARGET_ACTIVE;
+			eprintf(" Abort failed %" PRIx64 " %lx\n", cmdp->tag, cmdp->state);
+		}
+		target_cmd_io_done(cmdp, TASK_ABORTED);
+	}
+	free(requests);
+	return res;
 }
 
 static void bs_hyc_handle_completion(int fd, int events, void *datap)
@@ -474,13 +522,15 @@ static void bs_hyc_exit(struct scsi_lu *lup)
 }
 
 static struct backingstore_template hyc_bst = {
-	.bs_name		= "hyc",
-	.bs_datasize		= sizeof(struct bs_hyc_info),
-	.bs_init		= bs_hyc_init,
-	.bs_exit		= bs_hyc_exit,
-	.bs_open		= bs_hyc_open,
-	.bs_close		= bs_hyc_close,
-	.bs_cmd_submit		= bs_hyc_cmd_submit,
+	.bs_name = "hyc",
+	.bs_datasize = sizeof(struct bs_hyc_info),
+	.bs_init = bs_hyc_init,
+	.bs_exit = bs_hyc_exit,
+	.bs_open = bs_hyc_open,
+	.bs_close = bs_hyc_close,
+	.bs_cmd_submit = bs_hyc_cmd_submit,
+	.bs_cmd_abort = bs_hyc_cmd_abort,
+	.bs_stop = bs_hyc_stop,
 };
 
 __attribute__((constructor)) static void bs_hyc_constructor(void)
