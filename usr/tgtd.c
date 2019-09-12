@@ -650,9 +650,44 @@ static void remove_rest_call()
 	pthread_mutex_unlock(&ha_active_call_cnt_mutex);
 }
 
+static int max_queue_depth()
+{
+	const struct queue_size {
+		migration_profile_t profile;
+		int queue_depth;
+	} sizes[] = {
+		{kPerfProfile, 128},
+		{kStandardProfile, 64},
+		{kLiteProfile, 16},
+	};
+	const size_t nelements = sizeof(sizes) / sizeof(sizes[0]);
+	const migration_profile_t profile = ha_get_migration_profile(ha);
+	size_t i;
+	for (i = 0; i < nelements; ++i) {
+		if (profile == sizes[i].profile) {
+			return sizes[i].queue_depth;
+		}
+	}
+	return sizes[kPerfProfile].queue_depth;
+}
 
-static int target_create(const _ha_request *reqp,
-	_ha_response *resp, void *userp)
+static int set_target_max_queue_size(const char* tid)
+{
+	char cmd[512];
+	int rc = snprintf(
+		cmd,
+		sizeof(cmd),
+		"tgtadm --op update --mode target --tid %s --name=MaxQueueCmd --value=%d",
+		tid,
+		max_queue_depth()
+	);
+	if (rc >= sizeof(cmd)) {
+		return -EINVAL;
+	}
+	return exec(cmd);
+}
+
+static int target_create(const _ha_request *reqp, _ha_response *resp, void *userp)
 {
 	char cmd[512];
 	const char *tid = ha_parameter_get(reqp, "tid");
@@ -735,6 +770,8 @@ static int target_create(const _ha_request *reqp,
 		remove_rest_call();
 		return HA_CALLBACK_CONTINUE;
 	}
+
+	(void) set_target_max_queue_size(tid);
 
 	ha_set_empty_response_body(resp, HTTP_STATUS_OK);
 
