@@ -1327,6 +1327,68 @@ static int set_batching_attributes(const _ha_request *reqp,
 	return HA_CALLBACK_CONTINUE;
 }
 
+static int set_deployement_target(const _ha_request *reqp, _ha_response *resp,
+	void *userp)
+{
+	struct {
+		const char* name;
+		enum HycDeploymentTarget target;
+	} kTargets [] = {
+		{ "test", kDeploymentTest },
+		{ "customer", kDeploymentCustomer },
+	};
+
+	json_error_t error;
+	char *data = NULL;
+	json_t *root = NULL;
+
+	data = ha_get_data(reqp);
+	if (data == NULL) {
+		set_err_msg(resp, TGT_ERR_NO_DATA,
+			"json config not given");
+		goto error;
+	}
+
+	root = json_loads(data, 0, &error);
+	if (root == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_JSON,
+			"json config is incorrect");
+		goto error;
+	}
+
+	json_t* target = json_object_get(root, "target");
+	if (target == NULL && !json_is_string(target)) {
+		set_err_msg(resp, TGT_ERR_INVALID_JSON, "Expected deployment target");
+		goto error;
+	}
+
+	const char* value = json_string_value(target);
+	if (value == NULL) {
+		set_err_msg(resp, TGT_ERR_INVALID_JSON, "Expected deployment target");
+		goto error;
+	}
+
+	bool found = false;
+	for (int i = 0; i < ARRAY_SIZE(kTargets); ++i) {
+		if (strcasecmp(kTargets[i].name, value)) {
+			continue;
+		}
+		found = true;
+		HycSetDeploymentTarget(kTargets[i].target);
+		break;
+	}
+	if (found == false) {
+		HycSetDeploymentTarget(kDeploymentCustomer);
+	}
+error:
+	free(data);
+	if (root != NULL) {
+		json_decref(root);
+	}
+	return HA_CALLBACK_CONTINUE;
+}
+
+
 static int lun_delete(const _ha_request *reqp,
 	_ha_response *resp, void *userp)
 {
@@ -1576,6 +1638,7 @@ struct EndPoint {
 	{POST, "lun_delete", lun_delete},
 	{POST, "target_delete", target_delete},
 	{POST, "set_batching_attributes", set_batching_attributes},
+	{POST, "deployment_target", set_deployement_target},
 
 	{GET, "get_component_stats", get_component_stats},
 	{GET, "vmdk_stats", get_vmdk_stats},
