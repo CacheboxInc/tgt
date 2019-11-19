@@ -1357,7 +1357,7 @@ static int set_deployement_target(const _ha_request *reqp, _ha_response *resp,
 	}
 
 	json_t* target = json_object_get(root, "target");
-	if (target == NULL && !json_is_string(target)) {
+	if (target == NULL || !json_is_string(target)) {
 		set_err_msg(resp, TGT_ERR_INVALID_JSON, "Expected deployment target");
 		goto error;
 	}
