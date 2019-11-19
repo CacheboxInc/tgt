@@ -1638,7 +1638,7 @@ struct EndPoint {
 	{POST, "lun_delete", lun_delete},
 	{POST, "target_delete", target_delete},
 	{POST, "set_batching_attributes", set_batching_attributes},
-	{POST, "deployment_target", set_deployement_target},
+	{POST, "set_deployment_target", set_deployement_target},
 
 	{GET, "get_component_stats", get_component_stats},
 	{GET, "vmdk_stats", get_vmdk_stats},
