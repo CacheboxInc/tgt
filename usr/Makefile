@@ -49,7 +49,7 @@ CFLAGS += $(INCLUDES)
 ifneq ($(DEBUG), 0)
 CFLAGS += -g -O0 -ggdb -rdynamic
 else
-CFLAGS += -O2 -fno-strict-aliasing
+CFLAGS += -g -ggdb -O2 -fno-strict-aliasing
 endif
 CFLAGS += -Wall -Werror -fPIC
 CFLAGS += -DTGT_VERSION=\"$(VERSION)$(EXTRAVERSION)\"
