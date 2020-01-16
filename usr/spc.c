@@ -2073,7 +2073,7 @@ int spc_lu_init(struct scsi_lu *lu)
 	snprintf(lu->attrs.product_rev, sizeof(lu->attrs.product_rev),
 		 "%s", "0001");
 	snprintf(lu->attrs.scsi_id, sizeof(lu->attrs.scsi_id),
-		 "IET     %04x%04" PRIx64, tgt->tid, lu->lun);
+		 "VMware     %04x%04" PRIx64, tgt->tid, lu->lun);
 	snprintf(lu->attrs.scsi_sn, sizeof(lu->attrs.scsi_sn),
 		 "beaf%d%" PRIu64, tgt->tid, lu->lun);
 	lu->attrs.numeric_id = tgt->tid;
