@@ -1543,11 +1543,7 @@ static int get_component_stats(const _ha_request *reqp,
 	pthread_mutex_lock(&ha_rest_mutex);
 
 	if (0 != (rc = HycGetComponentStats(&g_stats))) {
-		if (rc == -EINVAL) {
-			set_err_msg(resp, TGT_ERR_GET_COMPONENT_STATS_FAILED,
-			"Failed to get component");
-		}
-		goto out;
+		//do nothing for now.
 	}
 
 	json_t *stats = json_array();
@@ -1585,7 +1581,6 @@ static int get_component_stats(const _ha_request *reqp,
 	ha_set_response_body(resp, HTTP_STATUS_OK, post_data, strlen(post_data));
 	free(post_data);
 
-out:
 	pthread_mutex_unlock(&ha_rest_mutex);
 	remove_rest_call();
 	return HA_CALLBACK_CONTINUE;
